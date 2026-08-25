@@ -441,6 +441,16 @@ if ! virsh vol-upload --pool "$POOL" "$VOLUME" "$IMAGE_LOCAL_PATH" >/dev/null 2>
   die "failed to import image into pool volume '${VOLUME}'"
 fi
 
+# DEVIATION (bugfix, verified live on this host, libvirt 10.0.0): `virsh
+# vol-upload` RESIZES the destination volume to the source size by default,
+# and this libvirt's virsh has NO --resize flag to disable it (the libvirt
+# API supports --resize=no, but the CLI exposes it only in newer versions).
+# With a 3.5G qcow2 source image a --disk 10 volume silently shrank to 3.5G.
+# Restore the contracted capacity explicitly.
+if ! virsh vol-resize "$VOLUME" "${DISK}G" "$POOL" >/dev/null 2>&1; then
+  die "failed to resize pool volume '${VOLUME}' to ${DISK}G"
+fi
+
 # MAC scheme (spec §5): 52:54:00:<3 random hex bytes>, generated once per run.
 # NOTE: the spec's literal one-liner emits the 3 random bytes as a bare hex
 # tail (52:54:00:24d2bd), which libvirt rejects ("unable to parse mac
