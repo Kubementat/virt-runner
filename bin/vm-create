@@ -33,7 +33,8 @@ USER_NAME=ubuntu                        # --user
 SSHKEY="$HOME/.ssh/id_ed25519.pub"      # --ssh-key (D10: dot is required)
 POOL=vm-pool                            # libvirt storage pool
 NET=default                             # libvirt network
-LEASE_FILE=/var/lib/libvirt/dnsmasq/virbr0.status
+# dnsmasq lease file; overridable for fixture tests (plan ground rule 5).
+LEASE_FILE="${VM_CREATE_LEASE_FILE:-/var/lib/libvirt/dnsmasq/virbr0.status}"
 
 # Default image/sums URLs (spec §5, release `resolute`).
 IMAGE_BASE_URL="https://cloud-images.ubuntu.com"
@@ -349,8 +350,15 @@ generate_cloud_init_files() {
   # ticket-01 preflight). $(<file) strips the trailing newline.
   ssh_key_line="$(<"$SSHKEY")"
 
+  # DEVIATION (ticket 05, verified live): the NoCloud datasource consumes the
+  # hostname from `local-hostname:` — the `hostnames:` dict below (EC2
+  # identity format, kept for spec §3.1 conformance) is IGNORED by NoCloud,
+  # which is why the first real boot kept the image default hostname
+  # `ubuntu`. `local-hostname:` is mandatory for the §5 `<NAME>.default`
+  # DNS name (dnsmasq takes the hostname from the DHCP lease).
   cat > "$CLOUD_INIT_TMP/meta-data" <<EOF
 id: $uuid
+local-hostname: $NAME
 hostnames:
   local: $NAME
   host: $NAME
@@ -385,16 +393,21 @@ generate_cloud_init_files
 
 # ---------------------------------------------------------------------------
 # Step 4 — VM creation via `virt-install --import` (spec §4 step 4, decision
-# D5). The invocation is the spec's verbatim shape with this script's
-# variables substituted. Rationale per flag (spec §4 step 4 table):
-#   --disk ...pool=vm-pool,format=qcow2  full qcow2 in vm-pool, named
-#                                        <NAME>_vda.qcow2 by virt-install
+# D5). Rationale per flag (spec §4 step 4 table):
+#   --disk vol=vm-pool/<NAME>_vda.qcow2  full qcow2 in vm-pool, named
+#                                        <NAME>_vda.qcow2 (spec §5 contract,
+#                                        which vm-destroy relies on)
 #   --network ...mac=$MAC                fixed, known-before-boot MAC so the
 #                                        step-5 lease match is deterministic
 #   --os-variant ubuntu-lts-latest       osinfo-db gap workaround (pitfall 6)
-#   --location + --import                byte-copy the raw image, NO installer
-#   --console none + console=ttyS0       unattended, but debuggable via
-#                                        `virsh console`
+#   --import                             byte-copy the raw image, NO installer
+#   --console none                       unattended; still debuggable via
+#                                        `virsh console` — Ubuntu cloud
+#                                        images ship a serial getty on ttyS0.
+#   NOTE: the spec's `--extra-args console=ttyS0` is REJECTED by virt-install
+#         4.1.0 here ("Kernel arguments are only supported with location or
+#         kernel installs") when booting a plain imported volume, so it is
+#         omitted; the image's own serial console covers the same debug path.
 #   --cloud-init "user-data=,meta-data=,clouduser-ssh-key=,disable=on"
 #                                        file-based NoCloud sub-options ONLY
 #                                        (virt-install 4.1.0). `disable=on`
@@ -402,7 +415,31 @@ generate_cloud_init_files
 #                                        `--cloud-init` is forbidden
 #                                        (pitfall 4: root-password-generate).
 #   --autostart                          VM survives host reboots.
+#
+# DEVIATION (ticket 05, verified live on this host, virt-install 4.1.0):
+# the spec's verbatim `--location $IMAGE --import` + `--disk size=…` shape
+# does NOT work with a raw disk image — virt-install 4.1.0 hard-fails with
+# "Error validating install location: Could not find an installable
+# distribution" (it probes --location as an install tree). It also names
+# self-created pool volumes '<NAME>.qcow2' (see
+# _generate_new_volume_name in virtinst/cli.py), which would violate the
+# '<NAME>_vda.qcow2' naming contract. Semantically equivalent flow used
+# instead: (1) create the pool volume with the contract name,
+# (2) `virsh vol-upload` the raw image into it (byte copy, exactly what
+# --import --location would do), (3) hand virt-install the existing volume
+# with `--import` (no installer, boots straight from the image).
 # ---------------------------------------------------------------------------
+
+VOLUME="${NAME}_vda.qcow2"
+
+if ! virsh vol-create-as "$POOL" "$VOLUME" --capacity "${DISK}G" --format qcow2 >/dev/null 2>&1; then
+  die "failed to create pool volume '${VOLUME}' in pool '${POOL}'"
+fi
+
+if ! virsh vol-upload --pool "$POOL" "$VOLUME" "$IMAGE_LOCAL_PATH" >/dev/null 2>&1; then
+  virsh --quiet vol-delete "$VOLUME" "$POOL" 2>/dev/null || true
+  die "failed to import image into pool volume '${VOLUME}'"
+fi
 
 # MAC scheme (spec §5): 52:54:00:<3 random hex bytes>, generated once per run.
 # NOTE: the spec's literal one-liner emits the 3 random bytes as a bare hex
@@ -413,23 +450,26 @@ generate_cloud_init_files
 MAC_TAIL="$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 MAC="52:54:00:${MAC_TAIL:0:2}:${MAC_TAIL:2:2}:${MAC_TAIL:4:2}"
 
-# GiB -> KiB conversion for --ram (spec §4 step 4 rationale table).
-RAM_KIB=$((RAM * 1024 * 1024))
-
-# IMAGE_PATH: the local cached image path produced by step 2 (final name).
-IMAGE_PATH="$IMAGE_LOCAL_PATH"
+# GiB -> MiB conversion for --ram. DEVIATION (ticket 05, verified live):
+# virt-install 4.1.0's --ram/--memory take MIB, not KiB (the spec's
+# "GiB→KiB" assumption allocates RAM*1024 times too much — the first real
+# boot got a 2 TiB guest, which stalled for minutes in early memory init).
+RAM_MIB=$((RAM * 1024))
 
 if ! virt-install \
   --name "$NAME" \
-  --ram "$RAM_KIB" --vcpu "$VCPUS" \
-  --disk "size=${DISK},bus=virtio,pool=${POOL},format=qcow2" \
+  --ram "$RAM_MIB" --vcpu "$VCPUS" \
+  --disk "vol=${POOL}/${VOLUME},bus=virtio" \
   --network "network=${NET},model=virtio,mac=${MAC}" \
   --os-variant ubuntu-lts-latest \
-  --location "$IMAGE_PATH" --import \
-  --extra-args "console=ttyS0" \
+  --import \
   --console none \
   --cloud-init "user-data=${CLOUD_INIT_TMP}/user-data,meta-data=${CLOUD_INIT_TMP}/meta-data,clouduser-ssh-key=${SSHKEY},disable=on" \
   --autostart; then
+  # Never leave an orphan volume behind on failure.
+  virsh --quiet destroy "$NAME" 2>/dev/null || true
+  virsh --quiet undefine "$NAME" 2>/dev/null || true
+  virsh --quiet vol-delete "$VOLUME" "$POOL" 2>/dev/null || true
   die "virt-install failed for '${NAME}' (see errors above); no VM left behind"
 fi
 
@@ -451,12 +491,185 @@ if [[ "$NO_BOOT" -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Boot path — wait-for-IP, SSH verification and the final output block
-# arrive in ticket 05. The VM IS running right now; tell the operator it
-# exists and how to tear it down so a test VM is never orphaned, then
-# exit 1 (per this slice's contract; full boot output comes in ticket 05).
+# Step 5 — wait for IP (dnsmasq lease-file polling) + mandatory SSH
+# verification (spec §4 step 5; decisions D6 + D8).
+#
+#   Primary source: the libvirt dnsmasq lease file $LEASE_FILE (overridable
+#   via VM_CREATE_LEASE_FILE, plan ground rule 5).
+#
+#   CONFIRMED FORMAT (ticket 05, real first boot, this host's libvirt/
+#   dnsmasq — the file the spec assumed to be `<ip> <mac> <hostname>`
+#   columns is actually): a pretty-printed JSON array, one object per
+#   lease, values on SEPARATE lines:
+#     [
+#       {
+#         "ip-address": "192.168.122.156",
+#         "mac-address": "52:54:00:ee:95:a7",   # lowercase
+#         "hostname": "poc-s5",
+#         "client-id": "ff:56:50:4d:98:00:02:00:00:...",
+#         "expiry-time": 1787682480
+#       },
+#       ...
+#     ]
+#   find_ip_for_mac parses this with jq (python3 fallback). A line-based
+#   column parser can NEVER match this format (MAC and IP are on different
+#   lines). For compatibility with the fixture-pinned contract (and older
+#   dnsmasq/libvirt variants), the legacy space-separated format
+#   `<ip> <mac> [<hostname>]` (2- or 3-column) is still parsed: the MAC
+#   field is matched case-insensitively (awk tolower on the file side, tr
+#   on the query side; a MAC with no preceding field is skipped, so
+#   degenerate lines are ignored non-fatally) and the field immediately
+#   before it (the IP) is returned.
+#
+#   NOTE: the file may contain leases of OTHER domains (stale entries of
+#   deleted VMs persist until renewed/expired) — the strict per-MAC match
+#   (MACs are unique per VM, fixed before boot) makes that harmless.
+#
+#   Polling: every 2 s, up to 60 polls (120 s, D8); cloud-init first boot is
+#   typically 20–40 s. When a lease matches, cross-check `virsh domstate`
+#   is `running` (belt-and-braces, spec §4 step 5.2).
+#
+#   Fallbacks (best-effort, in order, ONLY when the lease file is absent /
+#   unreadable / empty — spec §4 step 5.5, pitfall 2 keeps `virsh domifaddr`
+#   strictly behind the lease file):
+#     1. `virsh domifaddr $NAME` (default ARP source; unreliable until the
+#        guest ARP-announces — retried every 2 s up to 60 s)
+#     2. `arp -n | grep -i $MAC`
+#
+#   D6/AC3: the §3.1 success block is printed ONLY after the lease AND a
+#   proven `ssh ... exit 0` (retried every 2 s up to ~60 s). On any timeout:
+#   exit 1 with a clear error naming `virsh console <NAME>`.
 # ---------------------------------------------------------------------------
-echo "vm-create: '${NAME}' exists and is running, but wait-for-IP/SSH verification is not implemented in this slice (arrives in ticket 05)" >&2
-echo "Console: virsh console ${NAME}     (Ctrl-] to detach)" >&2
-echo "Teardown: vm-destroy ${NAME}   (or: virsh destroy ${NAME} && virsh undefine ${NAME})" >&2
-exit 1
+
+# find_ip_for_mac LEASE_FILE MAC -> prints the IP for that MAC, or nothing
+# (no match is non-fatal). Self-contained (no globals) so fixture tests can
+# eval it in isolation.
+find_ip_for_mac() {
+  local mac
+  # Lowercase the query MAC (awk tolower()/jq ascii_downcase cover the file
+  # side; tr covers the query side — the bash `tolower` builtin is missing
+  # on this host's bash 5.2.21).
+  mac="$(printf '%s' "$2" | tr 'A-Z' 'a-z')"
+  # JSON lease file (CONFIRMED format on this host — see Step 5 header):
+  if head -c1 "$1" 2>/dev/null | grep -q '\['; then
+    if command -v jq >/dev/null 2>&1; then
+      jq -r --arg mac "$mac" \
+        '.[]? | select(((."mac-address" // "") | ascii_downcase) == $mac) | .["ip-address"]' \
+        "$1" 2>/dev/null | head -n1
+    else
+      python3 -c '
+import json, sys
+try:
+    leases = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+mac = sys.argv[2].lower()
+for lease in leases:
+    if isinstance(lease, dict) and str(lease.get("mac-address", "")).lower() == mac:
+        print(lease.get("ip-address", ""))
+        break
+' "$1" "$mac" 2>/dev/null
+    fi
+    return 0
+  fi
+  # Legacy column format: `<ip> <mac> [<hostname>]` — the IP is the field
+  # immediately before the (case-insensitive matched) MAC field.
+  awk -v mac="$mac" '
+    {
+      n = split($0, f, /[ \t]+/)
+      for (i = 2; i <= n; i++) {
+        if (tolower(f[i]) == mac) { print f[i - 1]; exit }
+      }
+    }
+  ' "$1" 2>/dev/null
+}
+
+# fallback_ip NAME MAC -> best-effort IP via domifaddr (retry) then arp -n.
+fallback_ip() {
+  local name="$1" mac="$2" ip attempt
+  for (( attempt = 1; attempt <= 30; attempt++ )); do
+    ip="$(virsh domifaddr "$name" 2>/dev/null | awk 'NF >= 3 { print $3 }' | grep -E '^[0-9.]+$' | head -n1 || true)"
+    if [[ -n "$ip" ]]; then
+      echo "$ip"
+      return 0
+    fi
+    sleep 2
+  done
+  ip="$(arp -n 2>/dev/null | awk -v m="$(printf '%s' "$mac" | tr 'A-Z' 'a-z')" '{ for (i = 1; i <= NF; i++) if (tolower($i) == m) { print $1; exit } }' || true)"
+  if [[ -n "$ip" ]]; then
+    echo "$ip"
+    return 0
+  fi
+  return 1
+}
+
+# wait_for_ip NAME MAC -> prints the IP; returns 1 if none in time.
+wait_for_ip() {
+  local name="$1" mac="$2" ip attempt
+  local lease_usable=1
+  [[ -r "$LEASE_FILE" ]] || lease_usable=0
+
+  for (( attempt = 1; lease_usable && attempt <= 60; attempt++ )); do
+    if [[ -s "$LEASE_FILE" ]]; then
+      ip="$(find_ip_for_mac "$LEASE_FILE" "$mac")" || ip=""
+      if [[ -n "$ip" ]]; then
+        # Belt-and-braces cross-check (spec §4 step 5.2): the lease implies
+        # the guest is up; confirm the domain state agrees.
+        if [[ "$(virsh domstate "$name" 2>/dev/null || true)" == "running" ]]; then
+          echo "$ip"
+          return 0
+        fi
+      fi
+    fi
+    sleep 2
+  done
+
+  # Best-effort fallbacks: lease file absent, unreadable, or still empty.
+  if [[ ! -r "$LEASE_FILE" || ! -s "$LEASE_FILE" ]]; then
+    if ip="$(fallback_ip "$name" "$mac")"; then
+      echo "$ip"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# verify_ssh_reachable NAME IP -> exit 0 iff `ssh ... exit` succeeds within
+# ~60 s (30 attempts x 2 s; D8's ~60 s SSH window).
+verify_ssh_reachable() {
+  local attempt
+  for (( attempt = 1; attempt <= 30; attempt++ )); do
+    if ssh -o ConnectTimeout=2 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+        "${USER_NAME}@$2" exit 2>/dev/null; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+IP="$(wait_for_ip "$NAME" "$MAC")" \
+  || die "no DHCP lease after 120s — check: virsh console ${NAME}"
+echo "IP acquired: ${IP}"
+
+# Mandatory SSH verification (D6/AC3) — the success block below is printed
+# only if this succeeds.
+verify_ssh_reachable "$NAME" "$IP" \
+  || die "SSH to ${USER_NAME}@${IP} not reachable yet — check: virsh console ${NAME}"
+
+# ---------------------------------------------------------------------------
+# Step 6 — print the exact §3.1 success block (D9: format is authoritative).
+# ---------------------------------------------------------------------------
+# NOTE: the spec's literal `awk '/UUID/ {print $3}'` yields an empty string
+# on this host's virsh ("UUID:  <uuid>" is $1=$2, not $1..$3); $NF is robust
+# to either spacing (ticket 05, minor deviation).
+DOMAIN_UUID="$(virsh dominfo "$NAME" | awk '/UUID/ {print $NF}')"
+
+cat <<EOF
+VM created and running.
+Name:    ${NAME}   (UUID ${DOMAIN_UUID})
+IP:      ${IP}   (also reachable as ${NAME}.default)
+SSH:     ssh ${USER_NAME}@${IP}
+Console: virsh console ${NAME}     (Ctrl-] to detach)
+Teardown: vm-destroy ${NAME}   (or: virsh destroy ${NAME} && virsh undefine ${NAME})
+EOF
