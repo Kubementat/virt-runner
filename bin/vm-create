@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+#
+# vm-create — download a cached Ubuntu cloud image, generate cloud-init
+# files, and create+boot a KVM VM on the libvirt `default` NAT network.
+#
+# See ../specification/specification.md for the full contract:
+#   - CLI: vm-create <NAME> [OPTIONS]  (spec §3.1)
+#   - Pipeline: preflight → image → cloud-init → virt-install → IP → ssh (spec §4)
+#   - Exit codes: 0 = success, 1 = runtime/preflight failure, 2 = usage error
+#
+# Test-only environment hooks (documented per plan ground rule 5; not yet
+# used in slice S1 — later slices honor them):
+#   VM_CREATE_CACHE_DIR  Relocate the image cache directory (default ~/vm-images).
+#   VM_CREATE_LEASE_FILE Relocate the dnsmasq lease file
+#                        (default /var/lib/libvirt/dnsmasq/virbr0.status).
+#
+# Safety: only `poc-`-prefixed names are used in tests; this script never
+# touches `setup-test-vm` or any pre-existing volume.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Constants (defaults per spec §3.1)
+# ---------------------------------------------------------------------------
+RAM=4                                   # --ram, GiB
+VCPUS=2                                 # --vcpu
+DISK=30                                 # --disk, GiB
+RELEASE=resolute                        # --release
+USER_NAME=ubuntu                        # --user
+SSHKEY="$HOME/.ssh/id_ed25519.pub"      # --ssh-key (D10: dot is required)
+POOL=vm-pool                            # libvirt storage pool
+NET=default                             # libvirt network
+LEASE_FILE=/var/lib/libvirt/dnsmasq/virbr0.status
+
+# Default image/sums URLs (spec §5, release `resolute`).
+IMAGE_BASE_URL="https://cloud-images.ubuntu.com"
+IMAGE_URL="${IMAGE_BASE_URL}/${RELEASE}/current/${RELEASE}-server-cloudimg-amd64.img"
+SUMS_URL="${IMAGE_BASE_URL}/${RELEASE}/current/SHA256SUMS"
+
+NAME=""
+NO_BOOT=0
+KEEP_GOING=0
+RELEASE_GIVEN=0
+IMAGE_GIVEN=0
+IMAGE_ARG=""
+
+# ---------------------------------------------------------------------------
+# Usage / error helpers
+# ---------------------------------------------------------------------------
+usage() {
+  cat >&2 <<EOF
+Usage: vm-create <NAME> [OPTIONS]
+
+Create and boot an Ubuntu KVM VM via libvirt (qemu:///system) on the
+default NAT network, with the disk in the '${POOL}' storage pool.
+
+NAME must match ^[A-Za-z][A-Za-z0-9._-]*\$ and must not be an
+already-defined domain.
+
+Options (defaults in parentheses):
+  --ram GiB        Guest RAM in GiB, positive integer   (default: ${RAM})
+  --vcpu N         vCPU count, positive integer         (default: ${VCPUS})
+  --disk GiB       Virtual disk size in GiB, positive integer (default: ${DISK})
+  --release REL    Release codename; selects the standard image/SHA256SUMS
+                   URLs and overrides --image if both are given (D1)
+                   (default: ${RELEASE})
+  --image URL      Direct URL of a raw cloud image; overrides the default
+                   release image, unless --release is also given
+                   (default: ${IMAGE_URL})
+  --user USER      Cloud user name to create and SSH as (default: ${USER_NAME})
+  --ssh-key PATH   Path to the public key to inject (default: ~/.ssh/id_ed25519.pub)
+  --no-boot        Create the VM but do not boot / wait for IP (default: off)
+  --keep-going     On download/verify error, continue if a cached image exists
+                   (default: off)
+
+Exit codes: 0 success, 1 runtime/preflight failure, 2 usage error.
+EOF
+}
+
+die_usage() {
+  echo "vm-create: $*" >&2
+  usage
+  exit 2
+}
+
+die() {
+  echo "vm-create: $*" >&2
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+take_name() { # $1 = candidate NAME; caller shifts afterwards
+  if [[ -z "$NAME" ]]; then
+    NAME="$1"
+  else
+    die_usage "unexpected argument: $1"
+  fi
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --ram)
+      [[ $# -ge 2 ]] || die_usage "option --ram requires a value"
+      RAM="$2"; shift 2 ;;
+    --vcpu)
+      [[ $# -ge 2 ]] || die_usage "option --vcpu requires a value"
+      VCPUS="$2"; shift 2 ;;
+    --disk)
+      [[ $# -ge 2 ]] || die_usage "option --disk requires a value"
+      DISK="$2"; shift 2 ;;
+    --release)
+      [[ $# -ge 2 ]] || die_usage "option --release requires a value"
+      RELEASE="$2"; RELEASE_GIVEN=1; shift 2 ;;
+    --image)
+      [[ $# -ge 2 ]] || die_usage "option --image requires a value"
+      IMAGE_ARG="$2"; IMAGE_GIVEN=1; shift 2 ;;
+    --user)
+      [[ $# -ge 2 ]] || die_usage "option --user requires a value"
+      USER_NAME="$2"; shift 2 ;;
+    --ssh-key)
+      [[ $# -ge 2 ]] || die_usage "option --ssh-key requires a value"
+      SSHKEY="$2"; shift 2 ;;
+    --no-boot)
+      NO_BOOT=1; shift ;;
+    --keep-going)
+      KEEP_GOING=1; shift ;;
+    -*)
+      # Only long options (--...) are defined. A single-dash argument is
+      # treated as a NAME candidate and rejected by the name regex below
+      # (spec §3.1: names must not start with '-').
+      if [[ "$1" == --* ]]; then
+        die_usage "unknown option: $1"
+      fi
+      take_name "$1"; shift ;;
+    *)
+      take_name "$1"; shift ;;
+  esac
+done
+
+# --release/--image precedence (decision D1): when --release is given it
+# wins over --image, regardless of order on the command line. The release
+# selects the standard image + SHA256SUMS URL pattern (spec §5).
+if [[ "$RELEASE_GIVEN" -eq 1 ]]; then
+  IMAGE_URL="${IMAGE_BASE_URL}/${RELEASE}/current/${RELEASE}-server-cloudimg-amd64.img"
+  SUMS_URL="${IMAGE_BASE_URL}/${RELEASE}/current/SHA256SUMS"
+elif [[ "$IMAGE_GIVEN" -eq 1 ]]; then
+  IMAGE_URL="$IMAGE_ARG"
+  SUMS_URL=""
+fi
+
+[[ -n "$NAME" ]] || die_usage "missing NAME"
+
+# NAME validation (spec §4 step 1; usage error → exit 2).
+if ! [[ "$NAME" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]; then
+  die_usage "invalid VM name '$NAME': must match ^[A-Za-z][A-Za-z0-9._-]*\$"
+fi
+
+# Positive-integer validation for numeric options.
+for pair in "ram:${RAM}" "vcpu:${VCPUS}" "disk:${DISK}"; do
+  label="${pair%%:*}"; value="${pair#*:}"
+  if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+    die_usage "--${label} must be a positive integer (got '${value}')"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+# Step 1 — Preflight checks (spec §4 step 1). Each failure: one line on
+# stderr naming the check, exit 1.
+# ---------------------------------------------------------------------------
+
+# 1. libvirt reachable (socket-activated libvirtd; do NOT check systemctl —
+#    spec §6 pitfall 8).
+if ! virsh list >/dev/null 2>&1; then
+  die "preflight failed: libvirt not reachable ('virsh list' failed)"
+fi
+
+# 2. Domain NAME not already defined (suppress virsh dominfo's stderr).
+if virsh dominfo "$NAME" >/dev/null 2>&1; then
+  die "VM '${NAME}' already defined"
+fi
+
+# 3. Storage pool active.
+if ! virsh pool-list --all 2>/dev/null | awk -v p="$POOL" '$1 == p && $2 == "active" { found = 1 } END { exit !found }'; then
+  die "preflight failed: storage pool '${POOL}' is not active"
+fi
+
+# 4. Network active.
+if ! virsh net-list --all 2>/dev/null | awk -v n="$NET" '$1 == n && $2 == "active" { found = 1 } END { exit !found }'; then
+  die "preflight failed: network '${NET}' is not active"
+fi
+
+# 5. SSH key file exists and is non-empty.
+if [[ ! -s "$SSHKEY" ]]; then
+  die "ssh key not found: ${SSHKEY}"
+fi
+
+# ---------------------------------------------------------------------------
+# STUB — replaced by ticket 02+
+# (image download/cache, cloud-init generation, virt-install, IP wait and
+# the final output block are all out of scope for slice S1.)
+# ---------------------------------------------------------------------------
+echo "vm-create: not implemented in this slice (preflight passed for '${NAME}')" >&2
+exit 1
