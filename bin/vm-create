@@ -8,9 +8,9 @@
 #   - Pipeline: preflight → image → cloud-init → virt-install → IP → ssh (spec §4)
 #   - Exit codes: 0 = success, 1 = runtime/preflight failure, 2 = usage error
 #
-# Test-only environment hooks (documented per plan ground rule 5; not yet
-# used in slice S1 — later slices honor them):
+# Test-only environment hooks (documented per plan ground rule 5):
 #   VM_CREATE_CACHE_DIR  Relocate the image cache directory (default ~/vm-images).
+#                        Honored by fetch_and_verify_image (ticket 02).
 #   VM_CREATE_LEASE_FILE Relocate the dnsmasq lease file
 #                        (default /var/lib/libvirt/dnsmasq/virbr0.status).
 #
@@ -197,9 +197,122 @@ if [[ ! -s "$SSHKEY" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# STUB — replaced by ticket 02+
-# (image download/cache, cloud-init generation, virt-install, IP wait and
-# the final output block are all out of scope for slice S1.)
+# Step 2 — Image download + SHA256 verification + cache reuse (spec §4 step 2,
+# decisions D1 + D4). Honors the testability hook VM_CREATE_CACHE_DIR (plan
+# ground rule 5); the default cache root stays $HOME/vm-images.
+#
+#   --release path (or default release):  <cache>/<release>/<rel>-...amd64.img
+#   bare --image path (no --release):     <cache>/custom/<url-basename>
+#
+# D4: the image is fetched directly to the FINAL name (SHA256SUMS lists the
+#     final name) and verified in place; on any failure the file is removed.
+# D1: a bare --image verifies only if a same-directory SHA256SUMS is
+#     derivable (file:// or http(s)); otherwise verification is skipped and a
+#     warning is printed.
+# ---------------------------------------------------------------------------
+fetch_and_verify_image() {
+  local cache_root="${VM_CREATE_CACHE_DIR:-$HOME/vm-images}"
+  local cache_dir img_basename sums_url scheme verifiable
+
+  if [[ "$RELEASE_GIVEN" -eq 1 || "$IMAGE_GIVEN" -eq 0 ]]; then
+    # --release (or default release): standard URL pattern + SHA256SUMS.
+    cache_dir="$cache_root/$RELEASE"
+    img_basename="$RELEASE-server-cloudimg-amd64.img"
+    sums_url="$SUMS_URL"
+    verifiable=1
+  else
+    # bare --image (D1): cache under custom/ using the URL basename.
+    cache_dir="$cache_root/custom"
+    img_basename="${IMAGE_URL##*/}"
+    sums_url="${IMAGE_URL%/*}/SHA256SUMS"
+    scheme="${IMAGE_URL%%://*}"
+    if [[ "$scheme" == "file" || "$scheme" == "http" || "$scheme" == "https" ]]; then
+      verifiable=1
+    else
+      verifiable=0
+    fi
+  fi
+
+  local img="$cache_dir/$img_basename"
+  mkdir -p "$cache_dir"
+
+  # -- Cache hit (spec §4 step 2; AC2): skip download and sums entirely.
+  if [[ -f "$img" ]]; then
+    if [[ "$KEEP_GOING" -eq 1 ]]; then
+      echo "vm-create: warning: reusing cached image (no download): $img" >&2
+    fi
+    echo "image ready: $img"
+    return 0
+  fi
+
+  local img_ok=1 fail_msg=""
+
+  # -- Download (D4): fetch directly to the FINAL name in the cache dir.
+  #    file:// uses a local cp fast-path (reliable, no curl file:// quirks);
+  #    everything else uses curl.
+  if [[ "$IMAGE_URL" == file://* ]]; then
+    local src="${IMAGE_URL#file://}"
+    if ! cp -f "$src" "$img" 2>/dev/null; then
+      img_ok=0; fail_msg="download failed: $IMAGE_URL"
+    fi
+  else
+    if ! curl -fL --retry 3 -o "$img" "$IMAGE_URL" 2>/dev/null; then
+      img_ok=0; fail_msg="download failed: $IMAGE_URL"
+    fi
+  fi
+
+  if [[ "$img_ok" -eq 1 && "$verifiable" -eq 1 ]]; then
+    # -- Fetch the same-directory SHA256SUMS.
+    local sums_ok=0
+    if [[ "$sums_url" == file://* ]]; then
+      local ssrc="${sums_url#file://}"
+      if [[ -f "$ssrc" ]]; then cp -f "$ssrc" "$cache_dir/SHA256SUMS" 2>/dev/null && sums_ok=1; fi
+    else
+      if curl -fsL "$sums_url" -o "$cache_dir/SHA256SUMS" 2>/dev/null; then sums_ok=1; fi
+    fi
+
+    if [[ "$sums_ok" -eq 0 ]]; then
+      # D1: no derivable same-directory SHA256SUMS -> skip verification, warn.
+      echo "vm-create: warning: no same-directory SHA256SUMS for $IMAGE_URL; skipping verification" >&2
+    else
+      # -- Verify in place against the final filename (D4). Guard the pipeline
+      #    so "not in sums" (grep exit 1) and a hash mismatch both surface as a
+      #    clear error rather than a bare set -e abort (pipefail propagates).
+      local verify_out
+      if ! verify_out="$(cd "$cache_dir" && grep -F "$img_basename" SHA256SUMS 2>/dev/null | sha256sum -c - 2>&1)"; then
+        echo "$verify_out" >&2
+        img_ok=0
+        fail_msg="SHA256 mismatch for $img"
+      fi
+    fi
+  fi
+
+  # -- Failure handling (spec §4 step 2.4 / §3.1): remove the partial/corrupt
+  #    file, then apply --keep-going semantics.
+  if [[ "$img_ok" -ne 1 ]]; then
+    rm -f "$img"
+    if [[ "$KEEP_GOING" -eq 1 && -f "$img" ]]; then
+      # A good cached image survives at the final path -> continue with it.
+      echo "vm-create: warning: $fail_msg; continuing with cached image $img" >&2
+      echo "image ready: $img"
+      return 0
+    fi
+    if [[ "$KEEP_GOING" -eq 1 ]]; then
+      die "keep-going: $fail_msg; no cached image to continue with"
+    fi
+    die "$fail_msg"
+  fi
+
+  echo "image ready: $img"
+  return 0
+}
+
+# Run the download/verify step now that preflight has passed.
+fetch_and_verify_image
+
+# ---------------------------------------------------------------------------
+# STUB — cloud-init generation, virt-install, IP wait and the final output
+# block are still out of scope (cloud-init arrives in ticket 03).
 # ---------------------------------------------------------------------------
 echo "vm-create: not implemented in this slice (preflight passed for '${NAME}')" >&2
 exit 1
