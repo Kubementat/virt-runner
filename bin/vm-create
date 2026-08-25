@@ -237,6 +237,8 @@ fetch_and_verify_image() {
   fi
 
   local img="$cache_dir/$img_basename"
+  # Global so step 4 can use it as the local --location source path.
+  IMAGE_LOCAL_PATH="$img"
   mkdir -p "$cache_dir"
 
   # -- Cache hit (spec §4 step 2; AC2): skip download and sums entirely.
@@ -382,8 +384,79 @@ EOF
 generate_cloud_init_files
 
 # ---------------------------------------------------------------------------
-# STUB — virt-install, wait-for-IP and the final output block are still out of
-# scope (virt-install arrives in ticket 04). Report the temp dir, then exit 1.
+# Step 4 — VM creation via `virt-install --import` (spec §4 step 4, decision
+# D5). The invocation is the spec's verbatim shape with this script's
+# variables substituted. Rationale per flag (spec §4 step 4 table):
+#   --disk ...pool=vm-pool,format=qcow2  full qcow2 in vm-pool, named
+#                                        <NAME>_vda.qcow2 by virt-install
+#   --network ...mac=$MAC                fixed, known-before-boot MAC so the
+#                                        step-5 lease match is deterministic
+#   --os-variant ubuntu-lts-latest       osinfo-db gap workaround (pitfall 6)
+#   --location + --import                byte-copy the raw image, NO installer
+#   --console none + console=ttyS0       unattended, but debuggable via
+#                                        `virsh console`
+#   --cloud-init "user-data=,meta-data=,clouduser-ssh-key=,disable=on"
+#                                        file-based NoCloud sub-options ONLY
+#                                        (virt-install 4.1.0). `disable=on`
+#                                        is MANDATORY (pitfall 3); bare
+#                                        `--cloud-init` is forbidden
+#                                        (pitfall 4: root-password-generate).
+#   --autostart                          VM survives host reboots.
 # ---------------------------------------------------------------------------
-echo "vm-create: cloud-init files generated in '$CLOUD_INIT_TMP'; not implemented in this slice (virt-install arrives in ticket 04) — '${NAME}'" >&2
+
+# MAC scheme (spec §5): 52:54:00:<3 random hex bytes>, generated once per run.
+# NOTE: the spec's literal one-liner emits the 3 random bytes as a bare hex
+# tail (52:54:00:24d2bd), which libvirt rejects ("unable to parse mac
+# address"). Same scheme, colon-separated per group of 2 hex chars — the
+# result still matches the accepted form 52:54:00:xxxxxx (see ticket 04
+# report; deviation recorded).
+MAC_TAIL="$(head -c3 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+MAC="52:54:00:${MAC_TAIL:0:2}:${MAC_TAIL:2:2}:${MAC_TAIL:4:2}"
+
+# GiB -> KiB conversion for --ram (spec §4 step 4 rationale table).
+RAM_KIB=$((RAM * 1024 * 1024))
+
+# IMAGE_PATH: the local cached image path produced by step 2 (final name).
+IMAGE_PATH="$IMAGE_LOCAL_PATH"
+
+if ! virt-install \
+  --name "$NAME" \
+  --ram "$RAM_KIB" --vcpu "$VCPUS" \
+  --disk "size=${DISK},bus=virtio,pool=${POOL},format=qcow2" \
+  --network "network=${NET},model=virtio,mac=${MAC}" \
+  --os-variant ubuntu-lts-latest \
+  --location "$IMAGE_PATH" --import \
+  --extra-args "console=ttyS0" \
+  --console none \
+  --cloud-init "user-data=${CLOUD_INIT_TMP}/user-data,meta-data=${CLOUD_INIT_TMP}/meta-data,clouduser-ssh-key=${SSHKEY},disable=on" \
+  --autostart; then
+  die "virt-install failed for '${NAME}' (see errors above); no VM left behind"
+fi
+
+echo "VM '${NAME}' created (assigned MAC: ${MAC})"
+
+# ---------------------------------------------------------------------------
+# Decision D5 — `--no-boot`: stop-after-create. virt-install auto-starts the
+# domain, so guard the destroy with a domstate check: if the domain is
+# already shut off, the guarded branch is skipped and `set -e` does not abort.
+# ---------------------------------------------------------------------------
+if [[ "$NO_BOOT" -eq 1 ]]; then
+  if [[ "$(virsh domstate "$NAME" 2>/dev/null)" == "running" ]]; then
+    virsh --quiet destroy "$NAME"
+  fi
+  echo "VM created (not booted): ${NAME}"
+  echo "Console: virsh console ${NAME}     (Ctrl-] to detach)"
+  echo "Teardown: vm-destroy ${NAME}   (or: virsh destroy ${NAME} && virsh undefine ${NAME})"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Boot path — wait-for-IP, SSH verification and the final output block
+# arrive in ticket 05. The VM IS running right now; tell the operator it
+# exists and how to tear it down so a test VM is never orphaned, then
+# exit 1 (per this slice's contract; full boot output comes in ticket 05).
+# ---------------------------------------------------------------------------
+echo "vm-create: '${NAME}' exists and is running, but wait-for-IP/SSH verification is not implemented in this slice (arrives in ticket 05)" >&2
+echo "Console: virsh console ${NAME}     (Ctrl-] to detach)" >&2
+echo "Teardown: vm-destroy ${NAME}   (or: virsh destroy ${NAME} && virsh undefine ${NAME})" >&2
 exit 1
