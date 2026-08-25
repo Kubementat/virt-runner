@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+#
+# vm-destroy — companion teardown tool for vm-create (spec §3.2).
+#
+# Behavior, in order (spec §3.2, decisions D7):
+#   1. Preflight: <NAME> must be a DEFINED domain — otherwise exit 1 with
+#      `VM '<NAME>' is not defined`. No argument → usage on stderr, exit 2.
+#   2. If the domain is running, `virsh destroy <NAME>`; then `virsh undefine <NAME>`.
+#   3. Delete the disk volume: `virsh vol-delete <NAME>_vda.qcow2 vm-pool`
+#      (the exact name virt-install/vm-create assigns — spec §6 pitfall 7).
+#      If the volume is absent, print a warning and exit 0 (D7: a missing
+#      volume is already cleaned up, never a failure; idempotent teardown).
+#   4. Print confirmation: `VM '<NAME>' destroyed and disk removed.`
+#      (or the already-absent-volume variant).
+#
+# No confirmation prompt — the tool is meant to be scriptable. No sudo.
+#
+# Exit codes: 0 = success (incl. D7 volume-already-absent), 1 = runtime
+# failure (domain not defined; any non-"not found" volume-delete failure),
+# 2 = usage error.
+#
+# Safety: tests use only `poc-`-prefixed names; this script only ever
+# touches the domain <NAME> and the volume <NAME>_vda.qcow2 in vm-pool.
+
+set -euo pipefail
+
+POOL=vm-pool                            # libvirt storage pool (spec §3.2)
+
+usage() {
+  cat >&2 <<EOF
+Usage: vm-destroy <NAME>
+
+Destroy (if running) and undefine domain <NAME>, then delete its disk
+volume '<NAME>_vda.qcow2' from the '${POOL}' storage pool.
+
+A volume that is already absent is a warning, not an error (D7).
+A domain that is not defined is a hard error (exit 1).
+No confirmation prompt — safe to script.
+
+Exit codes: 0 success, 1 runtime failure, 2 usage error.
+EOF
+}
+
+# 0. Usage (spec §3.2.1): no argument (or wrong count) → usage, exit 2.
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 2
+fi
+
+NAME="$1"
+
+# 1. Preflight: <NAME> must be a DEFINED domain — hard error otherwise
+#    (spec §3.2.1; per D7, only "domain not defined" is a hard error).
+if ! virsh dominfo "$NAME" >/dev/null 2>&1; then
+  echo "VM '${NAME}' is not defined" >&2
+  exit 1
+fi
+
+# 2. Destroy-if-running, then undefine (spec §3.2.2). The guard makes a
+#    shutoff domain skip the destroy branch safely under `set -e`.
+#    Ordering is mandatory: vol-delete on a volume still backed by a
+#    defined/attached disk fails (spec §6; plan S6 key risk).
+if [[ "$(virsh domstate "$NAME")" == "running" ]]; then
+  virsh --quiet destroy "$NAME"
+fi
+virsh --quiet undefine "$NAME"
+
+# 3. Delete the disk volume (spec §3.2.3 + §6 pitfall 7): exactly
+#    <NAME>_vda.qcow2 in vm-pool — never a glob or a guessed name.
+VOLUME="${NAME}_vda.qcow2"
+
+volume_absent=0
+vol_err=""
+if ! vol_err="$(virsh vol-delete "$VOLUME" "$POOL" 2>&1)"; then
+  # D7 tolerance branch: a "volume not found"-style failure means the
+  # volume is already gone → warning + exit 0 (idempotent teardown).
+  if grep -qiE "not found|no such volume|does not exist" <<<"$vol_err"; then
+    volume_absent=1
+  else
+    echo "vm-destroy: failed to delete volume '${VOLUME}' in pool '${POOL}':" >&2
+    echo "$vol_err" >&2
+    exit 1
+  fi
+fi
+
+# 4. Confirmation (spec §3.2.4).
+if [[ "$volume_absent" -eq 1 ]]; then
+  echo "Warning: volume '${VOLUME}' in pool '${POOL}' was already absent; nothing to delete." >&2
+  echo "VM '${NAME}' destroyed and disk removed (volume already absent)."
+else
+  echo "VM '${NAME}' destroyed and disk removed."
+fi
+exit 0
