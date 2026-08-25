@@ -13,6 +13,9 @@
 #                        Honored by fetch_and_verify_image (ticket 02).
 #   VM_CREATE_LEASE_FILE Relocate the dnsmasq lease file
 #                        (default /var/lib/libvirt/dnsmasq/virbr0.status).
+#   VM_CREATE_CLOUD_INIT_DUMP  Copy the generated cloud-init user-data and
+#                        meta-data files into this directory before the EXIT
+#                        trap removes the temp dir (test-only, ticket 03).
 #
 # Safety: only `poc-`-prefixed names are used in tests; this script never
 # touches `setup-test-vm` or any pre-existing volume.
@@ -311,8 +314,76 @@ fetch_and_verify_image() {
 fetch_and_verify_image
 
 # ---------------------------------------------------------------------------
-# STUB — cloud-init generation, virt-install, IP wait and the final output
-# block are still out of scope (cloud-init arrives in ticket 03).
+# Step 3 — Cloud-init user-data / meta-data generation (spec §4 step 3,
+# decisions D2 + D3).
+#
+#   - Both files are written into a fresh `mktemp -d` directory (NEVER a
+#     static path); the dir is chmod 700, both files chmod 600.
+#   - A trap on EXIT removes the temp dir so it never survives.
+#   - Test-only dump hook (plan §2, S3): if VM_CREATE_CLOUD_INIT_DUMP is set,
+#     both files are copied into that directory BEFORE the EXIT trap removes
+#     the temp dir, so the generated content can be inspected after the run.
+#
+#   D3: `local:` and `host:` sit at IDENTICAL indentation under `hostnames:`
+#       (the research doc had a stray-indent bug that produced invalid
+#       NoCloud — do not repeat it).
+#   D2: the `--user` value (default `ubuntu`) flows verbatim into the
+#       `users: - name:` entry.
+#   Pitfall 5: NO `network:` section / no network-config is ever emitted; the
+#       image's default DHCP-on-first-NIC is relied upon.
+#
+# NOTE: CLOUD_INIT_TMP is intentionally global (not local) so the EXIT trap
+# can still see it when it fires after the function has returned.
 # ---------------------------------------------------------------------------
-echo "vm-create: not implemented in this slice (preflight passed for '${NAME}')" >&2
+generate_cloud_init_files() {
+  CLOUD_INIT_TMP="$(mktemp -d)"
+  chmod 700 "$CLOUD_INIT_TMP"
+  trap 'rm -rf "${CLOUD_INIT_TMP:-}"' EXIT
+
+  local uuid ssh_key_line
+  # Fresh lowercase UUID on EVERY run (uuidgen may emit uppercase; force lower).
+  uuid="$(uuidgen | tr 'A-Z' 'a-z')"
+  # Full single-line content of the --ssh-key file (non-empty guaranteed by the
+  # ticket-01 preflight). $(<file) strips the trailing newline.
+  ssh_key_line="$(<"$SSHKEY")"
+
+  cat > "$CLOUD_INIT_TMP/meta-data" <<EOF
+id: $uuid
+hostnames:
+  local: $NAME
+  host: $NAME
+EOF
+
+  cat > "$CLOUD_INIT_TMP/user-data" <<EOF
+#cloud-config
+manage_etc_hosts: true
+users:
+  - name: $USER_NAME
+    groups: [sudo]
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    ssh_authorized_keys:
+      - $ssh_key_line
+package_update: false
+EOF
+
+  chmod 600 "$CLOUD_INIT_TMP/user-data" "$CLOUD_INIT_TMP/meta-data"
+
+  # Test-only dump hook: copy both files out BEFORE the EXIT trap removes
+  # $CLOUD_INIT_TMP. Must happen before any exit.
+  if [[ -n "${VM_CREATE_CLOUD_INIT_DUMP:-}" ]]; then
+    mkdir -p "$VM_CREATE_CLOUD_INIT_DUMP"
+    cp "$CLOUD_INIT_TMP/meta-data" "$CLOUD_INIT_TMP/user-data" "$VM_CREATE_CLOUD_INIT_DUMP/"
+  fi
+
+  echo "cloud-init files generated: $CLOUD_INIT_TMP (meta-data, user-data; id=$uuid)"
+}
+
+# Run the cloud-init generation step now that the image is ready.
+generate_cloud_init_files
+
+# ---------------------------------------------------------------------------
+# STUB — virt-install, wait-for-IP and the final output block are still out of
+# scope (virt-install arrives in ticket 04). Report the temp dir, then exit 1.
+# ---------------------------------------------------------------------------
+echo "vm-create: cloud-init files generated in '$CLOUD_INIT_TMP'; not implemented in this slice (virt-install arrives in ticket 04) — '${NAME}'" >&2
 exit 1
