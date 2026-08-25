@@ -537,7 +537,8 @@ fi
 #     2. `arp -n | grep -i $MAC`
 #
 #   D6/AC3: the §3.1 success block is printed ONLY after the lease AND a
-#   proven `ssh ... exit 0` (retried every 2 s up to ~60 s). On any timeout:
+#   proven `ssh ... exit 0` (retried every 2 s up to ~90 s; ticket 07
+#   hardened D8's ~60 s window). On any timeout:
 #   exit 1 with a clear error naming `virsh console <NAME>`.
 # ---------------------------------------------------------------------------
 
@@ -635,10 +636,16 @@ wait_for_ip() {
 }
 
 # verify_ssh_reachable NAME IP -> exit 0 iff `ssh ... exit` succeeds within
-# ~60 s (30 attempts x 2 s; D8's ~60 s SSH window).
+# ~90 s (45 attempts x 2 s).
+#
+# Hardening (ticket 07): D8's window was ~60 s (30 attempts). Ticket 06
+# observed one real boot where the guest needed slightly longer than the
+# built-in 60 s SSH window (vm-create exited 1 after printing the IP). The
+# window is widened to ~90 s; everything else (2 s cadence, accept-new,
+# BatchMode, success block only after proven SSH) is unchanged.
 verify_ssh_reachable() {
   local attempt
-  for (( attempt = 1; attempt <= 30; attempt++ )); do
+  for (( attempt = 1; attempt <= 45; attempt++ )); do
     if ssh -o ConnectTimeout=2 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
         "${USER_NAME}@$2" exit 2>/dev/null; then
       return 0

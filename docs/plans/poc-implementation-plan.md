@@ -455,7 +455,7 @@ destroyed.
 | `virt-install --version` | 4.1.0 (file-based `--cloud-init` sub-options only — spec constraint confirmed) |
 | `qemu-img --version` | 8.2.2 |
 | `ls -la /var/lib/libvirt/dnsmasq/` | `virbr0.status` present, **0 bytes**, mode 644 (world-readable); `virbr0.macs` present (5 bytes, empty array); no leases currently |
-| `cat /var/lib/libvirt/dnsmasq/virbr0.status` | **Readable but empty** — lease-file format still unconfirmed; S5 remains the designated format-verification point (no fallback slice needed: file is readable, so the primary path is viable) |
+| `cat /var/lib/libvirt/dnsmasq/virbr0.status` | **Readable but empty** — lease-file format was unconfirmed at planning time; **now CONFIRMED** (S5 first real boot, re-confirmed on real resolute boots in S7 — see note below the table) |
 | `which genisoimage curl sha256sum uuidgen` | All present: `/usr/bin/genisoimage`, `/usr/bin/curl`, `/usr/bin/sha256sum`, `/usr/bin/uuidgen` |
 | `osinfo-db` (extra) | `0.20250606-0ubuntu0.24.04.1` — pre-26.04, confirms the osinfo gap; `ubuntu-lts-latest` workaround required |
 | `~/.ssh` (extra) | **No `id_ed25519.pub`** (default key absent — drives PD2); existing keys (`id_rsa.pub`, `id_forgejo.pub`, …) usable as alternate `--ssh-key` for pre-S5 tests |
@@ -464,6 +464,33 @@ destroyed.
 | `python3`, `ssh`, `ssh-keygen` (extra) | All present (`/usr/bin/`) — S3 YAML checks and PD2 are viable |
 | Noble image (extra) | `/var/lib/libvirt/images/vms/noble-server-cloudimg-amd64.img` — 674 MiB, root-owned, **world-readable** → PD1 feasible |
 | Host | Ubuntu 24.04 user `verfeinerer` in `libvirt`+`kvm` groups (all `virsh` calls above ran without sudo); `libvirtd` socket-activated |
+
+**CONFIRMED lease-file format** (ticket 05 first real boot; re-confirmed on
+the real resolute image in ticket 07 — see `docs/e2e-acceptance.md` §5.1):
+`/var/lib/libvirt/dnsmasq/virbr0.status` is NOT the assumed space-separated
+`<ip> <mac> <hostname>` line format. It is a **pretty-printed JSON array**,
+one object per lease, keys/values each on their own lines:
+
+```json
+[
+  {
+    "ip-address": "192.168.122.190",
+    "mac-address": "52:54:00:be:b2:b1",
+    "hostname": "poc-1",
+    "client-id": "ff:56:50:4d:98:00:02:00:00:ab:11:86:b7:eb:be:da:f5:e4:30",
+    "expiry-time": 1787691980
+  }
+]
+```
+
+Columns/keys: `ip-address`; `mac-address` — **lowercase** hex, colon-
+separated (the parser matches case-insensitively anyway); `hostname` —
+bare lease hostname taken from cloud-init `local-hostname:`; `client-id`;
+`expiry-time` (unix seconds). Stale leases of deleted VMs persist until
+renewed/expired, so the parser must match on the per-VM fixed MAC, not on
+line order. `bin/vm-create` parses the JSON (`jq`, `python3` fallback)
+and keeps a legacy 2/3-column space-separated fallback for older
+libvirt/dnsmasq variants; verified working on real boots in S5 and S7.
 
 **Environment-driven adaptations:** none of the suggested slice boundaries
 had to change. PD1 (Noble `file://` image for S5's first real boot) *preserves*
