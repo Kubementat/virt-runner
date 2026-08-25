@@ -2,10 +2,11 @@
 
 **`vm-create`: one command to a running, SSH-accessible Ubuntu KVM VM via libvirt + cloud-init.**
 
-A small POC project (two plain-bash scripts, no dependencies beyond the host's
-libvirt toolchain) that turns `vm-create <name>` into a booted,
-SSH-verified Ubuntu 26.04 (`resolute`) KVM guest, and `vm-destroy <name>` into
-a clean teardown that leaves no orphan disk behind.
+A small POC project (three plain-bash scripts, no dependencies beyond the
+host's libvirt toolchain) that turns `vm-create <name>` into a booted,
+SSH-verified Ubuntu 26.04 (`resolute`) KVM guest, `vm-destroy <name>` into
+a clean teardown that leaves no orphan disk behind, and `vm-list` into an
+at-a-glance view of every VM the tool created (with its SSH command).
 
 ## What it does
 
@@ -40,6 +41,16 @@ deletes the `<NAME>_vda.qcow2` volume from `vm-pool`. A missing volume is a
 warning, not an error (idempotent teardown); an undefined domain is a hard
 error. No confirmation prompt — it is scriptable.
 
+`vm-list` lists the VMs configured by `vm-create` — domains whose disk lives
+in the `vm-pool` storage pool — and prints one access-info block per VM in
+the same format as `vm-create`'s success output (name/UUID, IP, `ssh`
+command, console, teardown). The IP comes from the dnsmasq lease file via
+the VM's fixed MAC; a shut-off VM (or one without a lease yet) gets clear
+`IP:`/`SSH:` placeholders instead. VMs outside `vm-pool` (e.g.
+`setup-test-vm`) are never listed. The guest user is not stored in the
+domain XML, so the printed SSH user defaults to `ubuntu` and can be
+overridden with `--user`. Exit 0 even when no VMs are configured.
+
 ## Requirements
 
 Host prerequisites (the POC was built and accepted on a matching host;
@@ -69,7 +80,8 @@ Install (either works):
 mkdir -p ~/bin
 ln -s "$PWD/bin/vm-create" ~/bin/vm-create
 ln -s "$PWD/bin/vm-destroy" ~/bin/vm-destroy
-# …or: cp bin/vm-create bin/vm-destroy ~/bin/
+ln -s "$PWD/bin/vm-list" ~/bin/vm-list
+# …or: cp bin/vm-create bin/vm-destroy bin/vm-list ~/bin/
 ```
 
 Create a 2 GiB / 1 vCPU / 10 GiB VM named `poc-1` from the default
@@ -104,6 +116,9 @@ vm-create poc-3 --no-boot
 
 # Tear down (VM definition + disk volume, no prompt):
 vm-destroy poc-1
+
+# List all tool-created VMs (IP + ssh command per VM):
+vm-list
 ```
 
 Full evidence of a real end-to-end run (downloads, timings, SSH round-trips,
@@ -152,6 +167,32 @@ vm-destroy <NAME>
 
 No confirmation prompt. Same exit-code contract as `vm-create`.
 
+### `vm-list`
+
+```
+vm-list [--user USER]
+```
+
+Lists every VM whose disk lives in the `vm-pool` storage pool (i.e.
+configured by `vm-create`) — one block per VM in the same access-info
+format `vm-create` prints on success, including the `ssh` command. The IP
+is looked up in the dnsmasq lease file by the VM's fixed MAC (same
+parsing as `vm-create` step 5; honors `VM_LIST_LEASE_FILE`, falling back
+to `VM_CREATE_LEASE_FILE`).
+
+| Option | Meaning | Default |
+|---|---|---|
+| `--user USER` | User name shown in the printed SSH command (the actual guest user is whatever `vm-create --user` created) | `ubuntu` |
+
+| State | Printed `IP:` / `SSH:` lines |
+|---|---|
+| running + lease | IP (with `<NAME>.default` note) + `ssh <user>@<ip>` |
+| running, no lease yet | `(no DHCP lease found yet)` / `(unavailable — no IP yet)` |
+| shut off | `(no DHCP lease — VM not running)` / `(unavailable — start the VM first: virsh start NAME)` |
+
+No VMs configured → a hint line, still exit 0. Same exit-code contract as
+`vm-create`.
+
 ## How it works
 
 ```mermaid
@@ -169,6 +210,9 @@ flowchart TD
     D2[vm-destroy NAME] --> D3{defined domain?}
     D3 -- no --> X3[exit 1 'not defined']
     D3 -- yes --> D4[destroy if running → undefine<br/>→ vol-delete NAME_vda.qcow2 vm-pool<br/>missing volume = warn, still exit 0]
+L1[vm-list] --> L2{defined domains with a<br/>disk under vm-pool?}
+L2 -- yes --> L3[access-info block per VM<br/>name/UUID · state · IP from lease file (fixed MAC)<br/>ssh command · console · teardown line]
+L2 -- none --> L4[hint line, exit 0]
 ```
 
 Key design points: the **fixed MAC generated before boot** makes IP
@@ -184,7 +228,8 @@ remove exactly the right disk.
 virt-runner/
 ├── bin/
 │   ├── vm-create            # the primary tool (preflight → image → cloud-init → create → IP → SSH → info)
-│   └── vm-destroy           # companion teardown (destroy/undefine + volume delete)
+│   ├── vm-destroy           # companion teardown (destroy/undefine + volume delete)
+│   └── vm-list              # list tool-created VMs with IP + ssh command (vm-pool residents)
 ├── specification/
 │   └── specification.md     # the authoritative POC specification (CLI contract, pipeline, pitfalls, decisions D1–D10)
 ├── docs/

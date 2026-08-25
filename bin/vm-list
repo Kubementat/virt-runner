@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+#
+# vm-list — list the VMs configured by vm-create (i.e. domains whose disk
+# lives in the 'vm-pool' storage pool) and print each one in the same
+# access-info format as vm-create's success block, including the ssh
+# command to reach the VM.
+#
+# VMs outside the pool (e.g. setup-test-vm) are never listed and never
+# touched.
+#
+# A VM's SSH user is not stored in the domain XML (vm-create's --user only
+# flows into the guest), so the user is displayed as a fixed default
+# (ubuntu — vm-create's default) and can be overridden with --user.
+#
+# Test-only environment hook (mirrors vm-create, plan ground rule 5):
+#   VM_LIST_LEASE_FILE      Relocate the dnsmasq lease file used for the
+#                           IP lookup. Falls back to VM_CREATE_LEASE_FILE,
+#                           then /var/lib/libvirt/dnsmasq/virbr0.status.
+#
+# Exit codes: 0 success (including "no VMs found"), 1 runtime failure,
+#             2 usage error.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Constants (defaults per spec §3.1, kept in sync with vm-create)
+# ---------------------------------------------------------------------------
+USER_NAME=ubuntu                        # --user
+POOL=vm-pool                            # libvirt storage pool
+LEASE_FILE="${VM_LIST_LEASE_FILE:-${VM_CREATE_LEASE_FILE:-/var/lib/libvirt/dnsmasq/virbr0.status}}"
+
+# ---------------------------------------------------------------------------
+# Usage / error helpers
+# ---------------------------------------------------------------------------
+usage() {
+  cat >&2 <<EOF
+Usage: vm-list [OPTIONS]
+
+List VMs configured by vm-create (disk in the '${POOL}' storage pool),
+one access-info block per VM in the same format vm-create prints on
+success, including the ssh command.
+
+Options (defaults in parentheses):
+  --user USER      User name shown in the SSH command (default: ${USER_NAME}).
+                   The actual guest user is whatever vm-create --user
+                   created; this only affects the printed command.
+
+Exit codes: 0 success (also when no VMs are configured), 1 runtime failure,
+            2 usage error.
+EOF
+}
+
+die_usage() {
+  echo "vm-list: $*" >&2
+  usage
+  exit 2
+}
+
+die() {
+  echo "vm-list: $*" >&2
+  exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --user)
+      [[ $# -ge 2 ]] || die_usage "option --user requires a value"
+      USER_NAME="$2"; shift 2 ;;
+    -*)
+      die_usage "unknown option: $1" ;;
+    *)
+      die_usage "unexpected argument: $1" ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+# Preflight (mirrors vm-create step 1, narrowed to what listing needs).
+# ---------------------------------------------------------------------------
+if ! virsh list >/dev/null 2>&1; then
+  die "preflight failed: libvirt not reachable ('virsh list' failed)"
+fi
+
+if ! virsh pool-list --all 2>/dev/null | awk -v p="$POOL" '$1 == p { found = 1 } END { exit !found }'; then
+  die "preflight failed: storage pool '${POOL}' not found"
+fi
+
+# Root directory of the pool; a VM is "configured by vm-create" iff one of
+# its disk source paths lies under it. (pool-info omits the path; the pool
+# XML carries it in <dir><path> for a dir-type pool.)
+POOL_PATH="$(virsh pool-dumpxml "$POOL" 2>/dev/null | sed -n 's|.*<path>\([^<]*\)</path>.*|\1|p' | head -n1)"
+[[ -n "$POOL_PATH" ]] || die "failed to determine path of pool '${POOL}'"
+
+# ---------------------------------------------------------------------------
+# IP lookup — same lease-file parsing as vm-create step 5 (JSON format on
+# this host, legacy `<ip> <mac> [<hostname>]` columns as fallback).
+# ---------------------------------------------------------------------------
+# find_ip_for_mac LEASE_FILE MAC -> prints the IP for that MAC, or nothing
+# (no match is non-fatal, e.g. VM shut off or lease not renewed yet).
+find_ip_for_mac() {
+  local mac
+  mac="$(printf '%s' "$2" | tr 'A-Z' 'a-z')"
+  if head -c1 "$1" 2>/dev/null | grep -q '\['; then
+    if command -v jq >/dev/null 2>&1; then
+      jq -r --arg mac "$mac" \
+        '.[]? | select(((."mac-address" // "") | ascii_downcase) == $mac) | .["ip-address"]' \
+        "$1" 2>/dev/null | head -n1
+    else
+      python3 -c '
+import json, sys
+try:
+    leases = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+mac = sys.argv[2].lower()
+for lease in leases:
+    if isinstance(lease, dict) and str(lease.get("mac-address", "")).lower() == mac:
+        print(lease.get("ip-address", ""))
+        break
+' "$1" "$mac" 2>/dev/null
+    fi
+    return 0
+  fi
+  awk -v mac="$mac" '
+    {
+      n = split($0, f, /[ \t]+/)
+      for (i = 2; i <= n; i++) {
+        if (tolower(f[i]) == mac) { print f[i - 1]; exit }
+      }
+    }
+  ' "$1" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Main — iterate defined domains, keep those with a disk in $POOL.
+# ---------------------------------------------------------------------------
+DOMAINS="$(virsh list --all --name 2>/dev/null)"
+
+FOUND=0
+while IFS= read -r NAME; do
+  [[ -n "$NAME" ]] || continue
+
+  # Is any of this domain's disk source paths inside the pool?
+  if ! virsh domblklist "$NAME" 2>/dev/null | tail -n +3 | awk '{ print $2 }' \
+        | grep -q "^${POOL_PATH}/"; then
+    continue
+  fi
+
+  FOUND=1
+  STATE="$(virsh domstate "$NAME" 2>/dev/null || true)"
+  DOMAIN_UUID="$(virsh dominfo "$NAME" 2>/dev/null | awk '/UUID/ {print $NF}')"
+  # Fixed NIC MAC (vm-create assigns exactly one; first row suffices).
+  MAC="$(virsh domiflist "$NAME" 2>/dev/null | awk 'NF >= 5 && $5 ~ /^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$/ { print $5; exit }')"
+  IP=""
+  if [[ -n "$MAC" ]]; then
+    IP="$(find_ip_for_mac "$LEASE_FILE" "$MAC")" || IP=""
+  fi
+
+  if [[ "$STATE" == "running" && -n "$IP" ]]; then
+    HEADLINE="VM running."
+    IP_LINE="IP:      ${IP}   (also reachable as ${NAME}.default)"
+    SSH_LINE="SSH:     ssh ${USER_NAME}@${IP}"
+  elif [[ "$STATE" == "running" ]]; then
+    HEADLINE="VM running."
+    IP_LINE="IP:      (no DHCP lease found yet)"
+    SSH_LINE="SSH:     (unavailable — no IP yet)"
+  else
+    HEADLINE="VM ${STATE}."
+    IP_LINE="IP:      (no DHCP lease — VM not running)"
+    SSH_LINE="SSH:     (unavailable — start the VM first: virsh start ${NAME})"
+  fi
+
+  cat <<EOF
+${HEADLINE}
+Name:    ${NAME}   (UUID ${DOMAIN_UUID})
+${IP_LINE}
+${SSH_LINE}
+Console: virsh console ${NAME}     (Ctrl-] to detach)
+Teardown: vm-destroy ${NAME}   (or: virsh destroy ${NAME} && virsh undefine ${NAME})
+EOF
+done <<< "$DOMAINS"
+
+if [[ "$FOUND" -eq 0 ]]; then
+  echo "No VMs configured in pool '${POOL}' (vm-create <name> to create one)."
+fi
+exit 0
