@@ -60,7 +60,7 @@ def _text_block(vm: VmInfo, display_user: str) -> list[str]:
         ssh_line,
         f"Console: virsh console {vm.name}     (Ctrl-] to detach)",
         (
-            f"Teardown: vm-destroy {vm.name}   "
+            f"Teardown: virt-runner destroy {vm.name}   "
             f"(or: virsh destroy {vm.name} && virsh undefine {vm.name})"
         ),
     ]

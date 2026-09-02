@@ -1,103 +1,143 @@
 # virt-runner
 
-**`vm-create`: one command to a running, SSH-accessible Ubuntu KVM VM via libvirt + cloud-init.**
+**One command to a running, SSH-reachable Ubuntu KVM guest — via libvirt + cloud-init.**
 
-A small POC project (three plain-bash scripts, no dependencies beyond the
-host's libvirt toolchain) that turns `vm-create <name>` into a booted,
-SSH-verified Ubuntu 26.04 (`resolute`) KVM guest, `vm-destroy <name>` into
-a clean teardown that leaves no orphan disk behind, and `vm-list` into an
-at-a-glance view of every VM the tool created (with its SSH command).
+`virt-runner create poc-1` downloads (once, then caches), verifies, and imports an Ubuntu
+cloud image, builds it into a `vm-pool` volume, boots it with `virt-install` and an injected
+SSH key, waits for the DHCP lease, **proves SSH works with a real round-trip**, and prints
+the exact `ssh` / `virsh console` / teardown commands. `destroy` tears it down with no orphan
+disk. `list` shows every VM the tool created. Every command also speaks machine-readable
+JSON via `--json`.
 
-## What it does
+Written in Python (stdlib + `click`); all host interaction goes through `virsh`,
+`virt-install`, `curl`, and `ssh` — no libvirt Python bindings, no prompts, no sudo at
+run time.
 
-`vm-create` runs a six-step pipeline, fully unattended (no prompts, no sudo):
+---
 
-1. **Preflight** — fail fast (exit 1/2) if libvirt is unreachable, the name is
-   invalid or already defined, or the `vm-pool` pool / `default` network /
-   SSH key are missing.
-2. **Download + verify cloud image** — fetches the release's Ubuntu cloud
-   image into `~/vm-images/<release>/` and verifies it against the
-   published `SHA256SUMS`. A warm cache is reused, so the ~820 MiB image is
-   downloaded **exactly once per release**; every VM after the first costs
-   zero bandwidth.
-3. **cloud-init generation** — writes NoCloud `user-data` (injected SSH key,
-   cloud user, passwordless sudo) and `meta-data` (hostname) into a
-   throwaway `mktemp` dir (chmod 600, trap-cleaned).
-4. **VM creation** — `virt-install --import` with a pre-created
-   `<NAME>_vda.qcow2` in `vm-pool`, the `default` NAT network, a
-   **fixed MAC known before boot**, `--os-variant ubuntu-lts-latest`
-   (osinfo-db gap workaround), file-based `--cloud-init` sub-options with
-   `disable=on`, and `--autostart`.
-5. **IP discovery + SSH verification** — polls the dnsmasq lease file
-   (`/var/lib/libvirt/dnsmasq/virbr0.status`) for the fixed MAC (120 s
-   window), then proves `ssh <user>@<ip>` actually works (90 s window). The
-   success block is printed **only after** a real SSH round-trip succeeds;
-   otherwise the script exits 1 with a `virsh console` hint.
-6. **Access info** — prints the VM's name/UUID, IP, SSH command, console
-   command, and the `vm-destroy` teardown command.
+## 60-second start
 
-`vm-destroy <name>` destroys (if running) and undefines the domain, then
-deletes the `<NAME>_vda.qcow2` volume from `vm-pool`. A missing volume is a
-warning, not an error (idempotent teardown); an undefined domain is a hard
-error. No confirmation prompt — it is scriptable.
+```bash
+# 0. One-time host setup (apt-based, uses sudo; re-runnable; --check audits only)
+./install-prerequisites.sh            # then LOG OUT AND BACK IN (group membership)
 
-`vm-list` lists the VMs configured by `vm-create` — domains whose disk lives
-in the `vm-pool` storage pool — and prints one access-info block per VM in
-the same format as `vm-create`'s success output (name/UUID, IP, `ssh`
-command, console, teardown). The IP comes from the dnsmasq lease file via
-the VM's fixed MAC; a shut-off VM (or one without a lease yet) gets clear
-`IP:`/`SSH:` placeholders instead. VMs outside `vm-pool` (e.g.
-`setup-test-vm`) are never listed. The guest user is not stored in the
-domain XML, so the printed SSH user defaults to `ubuntu` and can be
-overridden with `--user`. Exit 0 even when no VMs are configured.
+# 1. Run it — `uv` creates the venv on first use
+uv run virt-runner list               # sanity check: libvirt + vm-pool reachable
+
+# 2. Create a VM (~2 min cold, ~20 s on a warm image cache)
+uv run virt-runner create poc-1 --ram 2 --vcpu 1 --disk 10
+
+# 3. Use it, then clean up
+ssh ubuntu@192.168.122.190            # printed by the command above
+uv run virt-runner destroy poc-1
+```
+
+The `virt-runner` CLI is the primary interface. It is installed as a console script by
+`uv tool install .` or `pip install -e .`, and is also available via `uv run virt-runner`:
+
+```bash
+uv run virt-runner create poc-1 --ram 2 --vcpu 1 --disk 10
+uv run virt-runner destroy poc-1
+uv run virt-runner list
+```
+
+For convenience, you can symlink the `virt-runner` binary to a directory on your PATH:
+
+```bash
+ln -s "$(uv run which virt-runner)" ~/bin/virt-runner   # ~/bin must be on PATH
+```
+
+---
 
 ## Requirements
 
-Host prerequisites (the POC was built and accepted on a matching host;
-preflight fails fast with a clear message if any of these are violated):
+**Host** (checked by the tool's preflight with an explicit error; created by
+`./install-prerequisites.sh`):
 
-- **KVM**: `/dev/kvm` present (`vmx`/`svm` CPU flag).
-- **libvirt** with:
-  - an **active `vm-pool`** storage pool (all tool-created disks live here), and
-  - the **active `default` NAT network** (dnsmasq DHCP, bridge `virbr0`,
-    guest LAN `192.168.122.0/24`).
-- **`virt-install` ≥ 4.1** (file-based `--cloud-init` sub-options —
-  `user-data=`, `meta-data=`, `clouduser-ssh-key=`, `disable=on`).
-- **`curl`**, **`uuidgen`** (plus `virsh`, `sha256sum`, `ssh`, `awk` — all
-  standard).
-- **User in the `libvirt` and `kvm` groups** — `virsh` must work **without
-  sudo** (`qemu:///system`).
-- A public SSH key to inject (default: `~/.ssh/id_ed25519.pub`).
+| Requirement | Detail |
+|---|---|
+| KVM | `/dev/kvm` usable (`kvm-ok`) |
+| libvirt at `qemu:///system` | `virsh list` must work **without sudo** → user in `libvirt` + `kvm` groups |
+| Storage pool `vm-pool` | **active**; every tool-created disk is `<NAME>_vda.qcow2` here |
+| Network `default` | **active** NAT (dnsmasq DHCP on `virbr0`, `192.168.122.0/24`) |
+| `virt-install` ≥ 4.1 | file-based `--cloud-init` sub-options |
+| CLI tools | `virsh`, `virt-install`, `curl`, `ssh` |
+| A public key | injected into the guest; default `~/.ssh/virt_runner_key.pub`, **generated by `create` when absent** |
+| Readable lease file | `/var/lib/libvirt/dnsmasq/virbr0.status` |
 
-Note: libvirt may be *socket-activated* (`libvirtd` shows "inactive" while
-`libvirtd.socket` is active) — that is normal and not an error.
+> `libvirtd` may be **socket-activated** — `systemctl status libvirtd` showing *inactive*
+> while `virsh list` works is normal. The tool never checks systemd, only `virsh`.
 
-## Quickstart
+**Python:** ≥ 3.10 plus `click`. The repo uses [`uv`](https://docs.astral.sh/uv/); `uv sync`
+builds `.venv/`, and `pip install -e .` / `pipx install .` / `uv tool install .` work too
+(console script: `virt-runner`; `python -m virt_runner` is an alias).
 
-Install (either works):
+---
+
+## Commands
+
+### `virt-runner create NAME` — build and boot a VM
+
+`NAME` must match `^[A-Za-z][A-Za-z0-9._-]*$` and must not already be a defined domain.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--ram N` | `4` | Guest RAM in **GiB** (converted to MiB for virt-install) |
+| `--vcpu N` | `2` | vCPU count |
+| `--disk N` | `30` | Disk size in **GiB** (qcow2 in `vm-pool`) |
+| `--release NAME` | `resolute` | Ubuntu release codename (`noble`, `jammy`, …) |
+| `--image URL` | — | Direct image URL (`http(s)://`, `file://`); ignored if `--release` is also given |
+| `--user NAME` | `ubuntu` | Cloud user created by cloud-init |
+| `--ssh-key PATH` | `~/.ssh/virt_runner_key.pub` | Public key to inject; a missing keypair is generated (`ssh-keygen -t ed25519`, no passphrase) |
+| `--no-boot` | off | Create the domain, then stop it; skip IP/SSH wait |
+| `--keep-going` | off | On download/verify failure, fall back to a cached image |
+| `--json` | off | Single JSON document on stdout, nothing else |
+
+Cold run (each line is real output; progress lines go to stdout, warnings to stderr):
 
 ```console
-mkdir -p ~/bin
-ln -s "$PWD/bin/vm-create" ~/bin/vm-create
-ln -s "$PWD/bin/vm-destroy" ~/bin/vm-destroy
-ln -s "$PWD/bin/vm-list" ~/bin/vm-list
-# …or: cp bin/vm-create bin/vm-destroy bin/vm-list ~/bin/
-```
-
-Create a 2 GiB / 1 vCPU / 10 GiB VM named `poc-1` from the default
-(`resolute`, 26.04) release:
-
-```console
-vm-create poc-1 --ram 2 --vcpu 1 --disk 10
-```
-
-Expected output (values substituted; the block is printed only after the
-DHCP lease is found **and** a real SSH round-trip succeeds):
-
-```console
+$ virt-runner create poc-1 --ram 2 --vcpu 1 --disk 10
+image ready: /home/me/vm-images/resolute/resolute-server-cloudimg-amd64.img
+cloud-init files generated: /tmp/tmpk3n2q8a9 (meta-data, user-data; id=6a1c…)
 VM 'poc-1' created (assigned MAC: 52:54:00:be:b2:b1)
 IP acquired: 192.168.122.190
 VM created and running.
+Name:    poc-1   (UUID 3961e1ee-0a48-4ecf-9d91-1a7a8f63a51f)
+Distro:  ubuntu resolute
+IP:      192.168.122.190   (also reachable as poc-1.default)
+SSH:     ssh ubuntu@192.168.122.190
+Console: virsh console poc-1     (Ctrl-] to detach)
+Teardown: vm-destroy poc-1   (or: virsh destroy poc-1 && virsh undefine poc-1)
+```
+
+The final block appears **only after** `ssh ubuntu@<ip> exit` has actually succeeded —
+a boot that never becomes reachable exits 1 with a `virsh console` hint instead of
+pretending success.
+
+The `~820 MiB` image is downloaded **once per release** into `~/vm-images/<release>/`
+and verified against the published `SHA256SUMS`; a warm cache is reused with zero
+bandwidth (and, by design, not re-hashed).
+
+### `virt-runner destroy NAME` — teardown
+
+`virsh destroy` (if running) → `virsh undefine` → `virsh vol-delete <NAME>_vda.qcow2 vm-pool`.
+No prompt. An already-absent volume is a **warning with exit 0** (teardown is idempotent);
+an undefined domain is a hard error.
+
+```console
+$ virt-runner destroy poc-1
+VM 'poc-1' destroyed and disk removed.
+```
+
+### `virt-runner list` — what the tool created
+
+Lists only domains whose disk lives in `vm-pool` — VMs you made by hand are never listed or
+touched. Prints one access block per VM (`--user` overrides the displayed SSH user, which
+is not stored in the domain XML). Empty result is a success (exit 0).
+
+```console
+$ virt-runner list
+VM running.
 Name:    poc-1   (UUID 3961e1ee-0a48-4ecf-9d91-1a7a8f63a51f)
 IP:      192.168.122.190   (also reachable as poc-1.default)
 SSH:     ssh ubuntu@192.168.122.190
@@ -105,183 +145,235 @@ Console: virsh console poc-1     (Ctrl-] to detach)
 Teardown: vm-destroy poc-1   (or: virsh destroy poc-1 && virsh undefine poc-1)
 ```
 
-More examples:
+---
+
+## `--json`: one document, always
+
+With `--json`, stdout carries **exactly one** JSON document and nothing else — progress and
+warnings are suppressed, so `… --json | jq .` is clean even when a terminal merges stderr.
+Usage errors (exit 2) are JSON too: a script that asked for JSON always gets JSON.
 
 ```console
-# Different release, explicit custom key:
-vm-create poc-2 --release noble --user ubuntu --ssh-key ~/.ssh/id_ed25519.pub
-
-# Create but do not boot (skips IP/SSH wait):
-vm-create poc-3 --no-boot
-
-# Tear down (VM definition + disk volume, no prompt):
-vm-destroy poc-1
-
-# List all tool-created VMs (IP + ssh command per VM):
-vm-list
+$ virt-runner create poc-1 --json | jq '.vm.ssh_command, .image.verification'
+"ssh ubuntu@192.168.122.190"
+"sha256-sums"
 ```
 
-Full evidence of a real end-to-end run (downloads, timings, SSH round-trips,
-teardown, final pool state) is in [`docs/e2e-acceptance.md`](docs/e2e-acceptance.md).
+Common envelope, then per-command sections:
 
-## CLI reference
+```json
+{
+  "tool": "vm-create", "version": "0.2.0", "status": "success", "error": null,
+  "booted": true,
+  "vm":    { "name": "poc-1", "uuid": "3961e1ee-…", "state": "running",
+             "distro": "ubuntu", "release": "resolute", "arch": "x86_64",
+             "ram_gib": 2, "vcpu": 1, "disk_gib": 10,
+             "mac": "52:54:00:be:b2:b1", "ip": "192.168.122.190",
+             "dns_name": "poc-1.default", "ssh_user": "ubuntu",
+             "ssh_command": "ssh ubuntu@192.168.122.190",
+             "console_command": "virsh console poc-1",
+             "teardown_command": "vm-destroy poc-1", "autostart": true },
+  "image": { "source_url": "https://cloud-images.ubuntu.com/resolute/current/…-amd64.img",
+             "cache_path": "/home/me/vm-images/resolute/resolute-server-cloudimg-amd64.img",
+             "cache_hit": false, "downloaded": true,
+             "verification": "sha256-sums", "verified": true }
+}
+```
 
-### `vm-create`
+On failure, `error.code` is a stable kebab-case code, `error.stage` names the pipeline
+stage, and **already-created resources are still reported** (a lease timeout shows the
+running VM and the image it booted from):
+
+```json
+{ "tool": "vm-create", "version": "0.2.0", "status": "error",
+  "error": { "code": "lease-timeout",
+             "message": "no DHCP lease after 120s — check: virsh console poc-1",
+             "stage": "wait-ip" },
+  "booted": false, "vm": { "name": "poc-1", "state": "running", "ip": null, "…": "…" },
+  "image": { "…": "…" } }
+```
+
+`destroy --json` returns `name`, `domain.{was_running,destroyed,undefined}`,
+`volume.{name,pool,deleted,already_absent}` and a top-level `warnings` array; `list --json` returns
+`pool`, `display_user`, `count`, and `vms[]` (`ip_status` ∈
+`lease | running-no-lease | not-running | no-mac`; `ip`/`ssh_command` are `null` unless
+`"lease"`). Full schema: `specification/python-rewrite.md` §5.
+
+**Debugging a silent `--json` run:** `VM_JSON_TRACE=1` re-sends the progress lines to
+stderr, keeping stdout parseable.
+
+---
+
+## What actually happens (`create`)
 
 ```
-vm-create <NAME> [OPTIONS]
+NAME
+ ├─ 1 preflight    virsh list · vm-pool active · default net active · name free · ssh key (generated if absent)
+ ├─ 2 image        cache hit?  ─ else curl -fL --retry 3 → ~/vm-images/<release>/
+ │                             + SHA256SUMS, exact-filename entry, partial file removed
+ ├─ 3 cloud-init   tmp 0700 dir: user-data + meta-data (0600, removed at interpreter exit)
+ ├─ 4 create       vol-create-as → vol-upload → vol-resize → fixed MAC → virt-install --import
+ │                 (any failure: domain + volume both deleted)
+ ├─ 5 wait-ip      dnsmasq lease file matched on the fixed MAC   (2 s × 120 s)
+ │    ssh-verify   ssh -o BatchMode=yes <user>@<ip> exit         (2 s × 90 s)
+ └─ 6 report       one run-state dict ─▶ text block  |  --json document
 ```
 
-`NAME` must match `^[A-Za-z][A-Za-z0-9._-]*$` and must not be an
-already-defined domain.
+1. **preflight** — libvirt reachable, `vm-pool` active, `default` network active, name not
+   taken, SSH key ready: a non-empty `--ssh-key` file is used as-is, a missing one is created
+   as a fresh passphrase-less ed25519 keypair (`public 0644` / `private 0600`), and a missing
+   public half is re-derived from an existing private key via `ssh-keygen -y`. Only a path that
+   cannot yield a key fails (`ssh-key-missing`: not `*.pub`, unwritable directory, `ssh-keygen`
+   error) — and a failed generation leaves no half-written keypair behind. Nothing else is
+   written, so a failure there needs no cleanup.
+2. **image** — cache hit → done. Else `curl -fL --retry 3` straight to the **final cache
+   filename**, fetch `SHA256SUMS`, compare the entry for *exactly* that filename
+   (`hashlib`, not `sha256sum`); any failure removes the partial file. `--image` without a
+   derivable same-directory `SHA256SUMS` warns and skips verification.
+3. **cloud-init** — NoCloud `user-data` (user, `sudo` group, `NOPASSWD`, your key,
+   `package_update: false`, **no `network:` section**) and `meta-data`
+   (`local-hostname` **and** `hostnames`) in a `0700` temp dir, files `0600`, removed at exit.
+4. **create** — `vol-create-as` → `vol-upload` → **`vol-resize` back to `--disk`** →
+   fixed MAC `52:54:00:<3 random bytes>` → `virt-install --import
+   --disk vol=vm-pool/<NAME>_vda.qcow2,bus=virtio --network
+   network=default,model=virtio,mac=… --os-variant ubuntu-lts-latest --cloud-init
+   user-data=…,meta-data=…,clouduser-ssh-key=…,disable=on --autostart`. Any failure removes
+   domain *and* volume.
+5. **wait-ip / ssh-verify** — poll the lease file for the fixed MAC (2 s × 120 s, JSON-array
+   format, `domifaddr`/`arp` only as fallbacks), then `ssh -o BatchMode=yes … exit` (2 s × 90 s).
+6. **report** — one run-state dict renders both the text block and the JSON document, so the
+   two can never drift apart.
 
-| Option | Meaning | Default |
+The non-obvious rules behind those steps are numbered **PI-1 … PI-16** in
+`specification/python-rewrite.md` §13 (plus `docs/lessons-learned/001-*`). The three that
+bite hardest if you touch stage 4:
+
+- **`vol-upload` silently resizes the volume to the source's virtual size** — the
+  `vol-resize` afterwards is mandatory (libvirt 10 has no `--resize=no`). Bug 001.
+- **`--ram` is MiB** in virt-install 4.1, not KiB.
+- **`disable=on` is mandatory** on `--cloud-init`; a bare `--cloud-init` makes virt-install
+  generate a root password.
+
+---
+
+## Exit codes and error codes
+
+`0` success · `1` runtime/preflight failure · `2` usage error (identical with or without `--json`).
+
+| Code | Exit | Typical cause |
 |---|---|---|
-| `--ram GiB` | Guest RAM in GiB (positive integer) | `4` |
-| `--vcpu N` | vCPU count (positive integer) | `2` |
-| `--disk GiB` | Virtual disk size in GiB (positive integer; qcow2 in `vm-pool`) | `30` |
-| `--release REL` | Release codename (`resolute`, `noble`, …); selects the standard image/`SHA256SUMS` URLs and **wins over `--image`** if both are given | `resolute` |
-| `--image URL` | Direct URL of a raw cloud image (cached under `~/vm-images/custom/`; verified only if a same-directory `SHA256SUMS` is derivable, else a warning is printed and verification skipped) | `https://cloud-images.ubuntu.com/resolute/current/resolute-server-cloudimg-amd64.img` |
-| `--user USER` | Cloud user name to create and to SSH as | `ubuntu` |
-| `--ssh-key PATH` | Path to the public key to inject | `~/.ssh/id_ed25519.pub` |
-| `--no-boot` | Create the VM (definition + disk + cloud-init) but leave it stopped; skips the IP/SSH steps and prints the not-booted variant | off |
-| `--keep-going` | On download/verification error: continue if a previously cached image exists, else fail with a clear error | off |
+| `usage` | 2 | bad flag, invalid `NAME`, missing argument |
+| `libvirt-unreachable` | 1 | `virsh list` fails → group membership / daemon |
+| `pool-not-active`, `network-not-active` | 1 | host not configured → re-run `install-prerequisites.sh` |
+| `vm-already-defined` | 1 | name in use (`virt-runner list` to see it) |
+| `ssh-key-missing` | 1 | key could not be prepared: path not `*.pub`, directory unwritable, or `ssh-keygen` failed (an *absent* key is no longer an error — it is generated) |
+| `image-download-failed`, `image-verification-failed`, `image-no-cache` | 1 | fetch/SHA256 problem; partial file is deleted |
+| `volume-create-failed`, `volume-import-failed`, `volume-resize-failed` | 1 | libvirt volume stage |
+| `vm-create-failed` | 1 | `virt-install` failed (domain + volume already cleaned up) |
+| `lease-timeout`, `ssh-timeout` | 1 | guest booted but unreachable → `virsh console NAME` |
+| `vm-not-defined`, `volume-delete-failed` | 1 | `destroy` |
+| `pool-not-found` | 1 | `list` |
 
-Unknown option or missing `NAME` → exit 2 with usage.
-Exit codes: `0` success · `1` runtime/preflight failure · `2` usage error.
+Full table: spec §5.2. `--json` failures carry the same code in `error.code`.
 
-### `vm-destroy`
+## Environment variables
 
-```
-vm-destroy <NAME>
-```
-
-1. Preflight: `<NAME>` must be a **defined** domain — otherwise exit 1
-   (`VM '<NAME>' is not defined`); no argument → exit 2 with usage.
-2. `virsh destroy <NAME>` (if running), then `virsh undefine <NAME>`.
-3. `virsh vol-delete <NAME>_vda.qcow2 vm-pool` — if the volume is already
-   absent, a warning is printed but the exit code is still 0 (idempotent
-   teardown).
-4. Prints `VM '<NAME>' destroyed and disk removed.` (or the already-absent
-   variant).
-
-No confirmation prompt. Same exit-code contract as `vm-create`.
-
-### `vm-list`
-
-```
-vm-list [--user USER]
-```
-
-Lists every VM whose disk lives in the `vm-pool` storage pool (i.e.
-configured by `vm-create`) — one block per VM in the same access-info
-format `vm-create` prints on success, including the `ssh` command. The IP
-is looked up in the dnsmasq lease file by the VM's fixed MAC (same
-parsing as `vm-create` step 5; honors `VM_LIST_LEASE_FILE`, falling back
-to `VM_CREATE_LEASE_FILE`).
-
-| Option | Meaning | Default |
-|---|---|---|
-| `--user USER` | User name shown in the printed SSH command (the actual guest user is whatever `vm-create --user` created) | `ubuntu` |
-
-| State | Printed `IP:` / `SSH:` lines |
+| Variable | Effect |
 |---|---|
-| running + lease | IP (with `<NAME>.default` note) + `ssh <user>@<ip>` |
-| running, no lease yet | `(no DHCP lease found yet)` / `(unavailable — no IP yet)` |
-| shut off | `(no DHCP lease — VM not running)` / `(unavailable — start the VM first: virsh start NAME)` |
+| `VM_CREATE_CACHE_DIR` | Relocate the image cache root (default `~/vm-images`) |
+| `VM_CREATE_LEASE_FILE` / `VM_LIST_LEASE_FILE` | Read IPs from another lease file (fixtures/tests) |
+| `VM_CREATE_CLOUD_INIT_DUMP` | Copy generated `user-data`/`meta-data` there before cleanup |
+| `VM_JSON_TRACE` | With `--json`, echo progress/warning lines to stderr |
 
-No VMs configured → a hint line, still exit 0. Same exit-code contract as
-`vm-create`.
+---
 
-## How it works
-
-```mermaid
-flowchart TD
-    A[vm-create NAME options] --> B{Step 1 — Preflight<br/>libvirt reachable · name valid & unused<br/>vm-pool active · default net active<br/>SSH key present}
-    B -- fail --> X1[exit 1 / exit 2 + clear error]
-    B -- pass --> C[Step 2 — Image cache<br/>~/vm-images/ release or custom/<br/>curl + SHA256SUMS verify<br/>warm cache → skip download]
-    C --> D[Step 3 — cloud-init files<br/>mktemp dir, chmod 600, trap cleanup<br/>user-data: SSH key, user, sudo<br/>meta-data: hostname + fresh UUID]
-    D --> E[Step 4 — virt-install --import<br/>disk NAME_vda.qcow2 in vm-pool<br/>default NAT net · fixed MAC 52:54:00:xxxxxx<br/>--os-variant ubuntu-lts-latest<br/>--cloud-init user-data=,meta-data=,clouduser-ssh-key=,disable=on<br/>--autostart]
-    E -- --no-boot --> N[stop domain, print not-booted block, exit 0]
-    E --> F[Step 5 — Wait for IP<br/>poll /var/lib/libvirt/dnsmasq/virbr0.status<br/>match fixed MAC (JSON, legacy fallback)<br/>120 s window]
-    F --> G[Step 5b — SSH verification<br/>ssh BatchMode accept-new user@IP exit<br/>90 s window — mandatory]
-    G -- timeout --> X2[exit 1 + 'check: virsh console NAME']
-    G -- proven --> H[Step 6 — Access info<br/>name/UUID · IP · SSH · console<br/>vm-destroy teardown line]
-    D2[vm-destroy NAME] --> D3{defined domain?}
-    D3 -- no --> X3[exit 1 'not defined']
-    D3 -- yes --> D4[destroy if running → undefine<br/>→ vol-delete NAME_vda.qcow2 vm-pool<br/>missing volume = warn, still exit 0]
-L1[vm-list] --> L2{defined domains with a<br/>disk under vm-pool?}
-L2 -- yes --> L3[access-info block per VM<br/>name/UUID · state · IP from lease file (fixed MAC)<br/>ssh command · console · teardown line]
-L2 -- none --> L4[hint line, exit 0]
-```
-
-Key design points: the **fixed MAC generated before boot** makes IP
-discovery deterministic against the dnsmasq lease file (no
-`qemu-guest-agent` needed); `cloud-init … disable=on` makes reboots
-deterministic; `--autostart` makes the VM survive host reboots; the
-`<NAME>_vda.qcow2` volume-naming convention is what lets `vm-destroy`
-remove exactly the right disk.
-
-## Project layout
+## Repository map
 
 ```
-virt-runner/
-├── bin/
-│   ├── vm-create            # the primary tool (preflight → image → cloud-init → create → IP → SSH → info)
-│   ├── vm-destroy           # companion teardown (destroy/undefine + volume delete)
-│   └── vm-list              # list tool-created VMs with IP + ssh command (vm-pool residents)
-├── specification/
-│   └── specification.md     # the authoritative POC specification (CLI contract, pipeline, pitfalls, decisions D1–D10)
-├── docs/
-│   ├── plans/
-│   │   └── poc-implementation-plan.md   # vertical-slice plan S1–S7, planner decisions PD1–PD4, environment verification
-│   ├── reviews/
-│   │   └── poc-review.md                # independent review (Agent 5): verdict PASS, per-slice checklist, gaps G1–G8
-│   ├── e2e-acceptance.md                # recorded end-to-end acceptance evidence (all 5 ACs, verbatim outputs)
-│   └── POC-Implementation-Documentation.md  # what was done, in what order (this POC's narrative + traceability)
-├── .tickets/
-│   └── ticket-01..07-*.md     # one self-contained work ticket per slice, in strict execution order
-├── README.md
-└── CHANGELOG.md
+virt-runner                    console script (primary CLI; `uv run virt-runner` also works)
+install-prerequisites.sh       host setup: KVM, libvirt, groups, vm-pool, default net (--check)
+src/virt_runner/
+  cli.py                       click group: create | destroy | list
+  args.py                      JsonCommand — injects --json, JSON-ifies usage errors (exit 2)
+  cmd_create.py                the 6-stage pipeline + run-state → text/JSON
+  cmd_destroy.py, cmd_list.py  teardown, pool-scoped listing
+  virtualizer.py               EVERY host call (virsh, virt-install, curl, ssh, arp)
+  output.py                    text vs --json: progress/warn routing, envelope, exit
+  errors.py                    VirtError(message, code, stage)
+config/distro-profiles.sh      WIP data for the multi-distro feature (not wired in yet)
+specification/                 the contracts (see below)
+docs/                          acceptance evidence, lessons learned, reviews, plans
+.tickets/initial-poc/          the slice-per-ticket workflow used to build the POC
 ```
 
-## Development process
+**Dependency rule:** `cli → cmd_* → virtualizer → core (output, errors)`. Only
+`virtualizer.py` touches the host, and every one of its subprocess calls goes through five
+helpers (`_run`, `_stdout`, `_spawn`, `_quiet`, `_passthrough`) so `check=` is always
+explicit. Text and JSON both render from one run-state dict — new fields are added in exactly
+one place.
 
-This project was built by an orchestrated multi-agent pipeline, each phase
-committed as it landed:
+### Where to read next
 
-1. **Specification** (Agent 1) — research doc → authoritative
-   [`specification/specification.md`](specification/specification.md)
-   (CLI contract, pipeline, verified host facts, pitfalls, decisions D1–D10).
-2. **Planning** (Agent 2) →
-   [`docs/plans/poc-implementation-plan.md`](docs/plans/poc-implementation-plan.md)
-   — 7 strictly sequential **vertical slices** (S1→S7), planner decisions
-   PD1–PD4, testing strategy, risk table, read-only environment verification.
-3. **Ticketing** (Agent 3) → [`.tickets/`](.tickets/README.md) — one
-   self-contained ticket per slice, each with deliverables, safety rules,
-   checkable acceptance criteria, and its exact commit message.
-4. **Implementation** (worker agents) — one ticket at a time, strictly in
-   order; each slice was verified on the real host (fixture tests first,
-   real libvirt objects from S4, real guest boots from S5, full E2E in S7)
-   and committed individually.
-5. **Review & verification** (Agent 5) →
-   [`docs/reviews/poc-review.md`](docs/reviews/poc-review.md) — independent
-   re-runs of every safe check; verdict **PASS**.
-6. **Final documentation** (Agent 6) — this README,
-   [`CHANGELOG.md`](CHANGELOG.md), and
-   [`docs/POC-Implementation-Documentation.md`](docs/POC-Implementation-Documentation.md).
+| Document | What it gives you |
+|---|---|
+| `specification/python-rewrite.md` | **The binding spec for this code**: CLI §3, text §4, JSON §5, pipeline §6, architecture §11, invariants PI-1…16 §13, acceptance §15 |
+| `specification/specification.md` | Original POC contract, decisions D1–D10 |
+| `specification/features/generalize-vm-creation-*.md` | Next feature: multi-distro profiles + aarch64 (specified, not yet implemented) |
+| `docs/POC-Implementation-Documentation.md` | Bash-POC development narrative and traceability |
+| `docs/e2e-acceptance.md` | Recorded acceptance run on a real host |
+| `docs/lessons-learned/001-vol-upload-implicit-resize.md` | Bug 001 in depth |
+| `docs/reviews/poc-review.md` | Independent review, gaps G1–G8 |
 
-## Status
+---
 
-**POC accepted — verdict PASS** (review 2026-08-25). All five spec
-acceptance criteria are satisfied with recorded, same-day end-to-end
-evidence on the real host using the real Ubuntu 26.04 cloud image:
-unattended clean-state creation, single-download cache reuse,
-SSH-gated success output (including the negative leg), autostart +
-orphan-free teardown, and fail-fast name collision (18 ms). Remaining
-items are documented gaps, not blockers — see
-[`docs/reviews/poc-review.md`](docs/reviews/poc-review.md) §3 (G1–G8) and
-the follow-ups section of
-[`docs/POC-Implementation-Documentation.md`](docs/POC-Implementation-Documentation.md).
+## Development
 
-Version **v0.1.0** — see [`CHANGELOG.md`](CHANGELOG.md).
+```bash
+uv sync                     # create .venv + install click (dev group adds ruff)
+uv run ruff check .         # lint   (E4/E7/E9, F, I, UP, B, SIM, BLE, PIE, FURB, ISC, PLW)
+uv run ruff format .        # format (line length 88, target py310)
+uv run virt-runner list     # smoke test
+uv build                    # wheel + sdist into dist/
+```
+
+There is **no automated test suite yet** — `tests/` (unit + fixture-driven e2e) is designed in
+`specification/python-rewrite.md` §12 and is the biggest open gap. Until it lands, the loop is:
+`ruff check` → `uv run virt-runner --help` → a real `--no-boot` VM (fast, no network wait, no
+lease dependency) → full create/destroy.
+
+**Rules for testing against a real host** (inherited from the ticket workflow, still binding):
+
+- Create only `poc-`-prefixed names; tear everything down in the same session
+  (`virt-runner destroy <name>`), and confirm `vm-pool` is back to its baseline.
+- Never touch VMs or pools you did not create — `list`/`destroy` are `vm-pool`-scoped, so
+  stay inside it.
+- No sudo while running the tool: preflight exists to prove sudo isn't needed.
+- Never commit build output or real SSH private keys. `.gitignore` is minimal
+  (`__pycache__/` only); `.venv/` and `.ruff_cache/` self-ignore, so add `dist/` if you
+  build wheels. Use `VM_CREATE_CACHE_DIR=/tmp/…` for a throwaway image cache.
+
+### Status
+
+- **v0.2.0** — Python rewrite of the accepted bash POC: `create` / `destroy` / `list`,
+  `--json` contract, click CLI, `Virtualizer` host layer. Text output and exit codes are
+  kept byte-compatible with the bash tools on purpose — treat them as part of the API.
+- **Ubuntu-only.** The `--distro` / `--arch` / `--boot` / `--image-sha256` / `--wait-lease`
+  / `--wait-ssh` flags and the TOML profile data model are specified but **not implemented**;
+  `DISTRO = "ubuntu"` is a deliberate placeholder in `cmd_create.py`.
+- Package version in `pyproject.toml` (`0.2.0`) is what `--json` reports as `version`.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `preflight failed: libvirt not reachable` | Not in `libvirt`/`kvm` groups in this shell → re-login, verify `virsh list` works without sudo, re-run `./install-prerequisites.sh --check` |
+| `storage pool 'vm-pool' is not active` | `virsh pool-start vm-pool && virsh pool-autostart vm-pool` |
+| `network 'default' is not active` | `virsh net-start default && virsh net-autostart default` |
+| `no DHCP lease after 120s` | Guest is up but not DHCP'ing: `virsh console poc-1` (Ctrl-`]` to detach). Common on images without cloud-init/NoCloud |
+| `SSH to ubuntu@… not reachable yet` | Key mismatch (`--ssh-key` points at a different key than you use — the generated default needs `ssh -i ~/.ssh/virt_runner_key ubuntu@IP`), wrong `--user`, or guest firewall |
+| `download failed: <url>` | Release codename doesn't exist at `cloud-images.ubuntu.com/<release>/current/`; URL is printed verbatim — check it in a browser |
+| `SHA256 mismatch for …` | Corrupt or substituted image: partial file is deleted; delete the cache dir for that release and retry |
+| VM survives `destroy` with a disk left | `virsh vol-list vm-pool`, then `virsh vol-delete <NAME>_vda.qcow2 vm-pool` |
+| `virt-runner: command not found` | Use `uv run virt-runner …` or `uv tool install .` |

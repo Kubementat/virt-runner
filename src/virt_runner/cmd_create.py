@@ -119,7 +119,8 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
 @click.option(
     "--ssh-key",
     default=Virtualizer.DEFAULT_SSH_KEY,
-    help="Path to the public key to inject [default: ~/.ssh/id_ed25519.pub]",
+    help="Path to the public key to inject; generated when absent "
+    "[default: ~/.ssh/virt_runner_key.pub]",
 )
 @click.option(
     "--no-boot",
@@ -193,7 +194,8 @@ def cmd_create(
         output.fail_with("create", exc, "vm-already-defined", stage="preflight")
 
     try:
-        v.ssh_key_exists(ssh_key)
+        # Generated on first use when absent, so no manual key setup is needed.
+        v.ensure_ssh_key(ssh_key)
     except RuntimeError as exc:
         output.fail_with("create", exc, "ssh-key-missing", stage="preflight")
 
@@ -303,7 +305,7 @@ def cmd_create(
         click.echo(f"Distro:  {DISTRO} {effective_release}")
         click.echo(f"Console: virsh console {name}     (Ctrl-] to detach)")
         click.echo(
-            f"Teardown: vm-destroy {name}   "
+            f"Teardown: virt-runner destroy {name}   "
             f"(or: virsh destroy {name} && virsh undefine {name})"
         )
         return
@@ -357,6 +359,6 @@ def cmd_create(
     click.echo(f"SSH:     ssh {user}@{ip}")
     click.echo(f"Console: virsh console {name}     (Ctrl-] to detach)")
     click.echo(
-        f"Teardown: vm-destroy {name}   "
+        f"Teardown: virt-runner destroy {name}   "
         f"(or: virsh destroy {name} && virsh undefine {name})"
     )

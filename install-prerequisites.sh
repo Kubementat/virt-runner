@@ -51,6 +51,18 @@ success() { printf '%s    + %s%s\n' "${GREEN}" "$*" "${RESET}"; }
 warn()    { printf '%s    ! %s%s\n' "${YELLOW}" "$*" "${RESET}" >&2; }
 error()   { printf '%sERROR: %s%s\n' "${RED}${BOLD}" "$*" "${RESET}" >&2; exit 1; }
 
+# Interactive yes/no prompt. Reads from the controlling terminal so it works
+# even when stdout is piped, and answers "no" (returns 1) when no terminal is
+# available — a non-interactive run must never install anything by itself.
+ask_yes_no() {
+  local reply=""
+  # 2>/dev/null goes FIRST: redirections apply left to right, so the open of
+  # /dev/tty failing (no controlling terminal) stays silent this way.
+  printf '%s [y/N] ' "$1" 2>/dev/null > /dev/tty || return 1
+  read -r reply < /dev/tty 2>/dev/null || return 1
+  [[ "${reply}" =~ ^[Yy]$ ]]
+}
+
 # -----------------------------------------------------------------------------
 # Configuration (resolved before argument parsing so --help shows defaults)
 # -----------------------------------------------------------------------------
@@ -105,9 +117,25 @@ done
 # -----------------------------------------------------------------------------
 # What src/virt_runner/virtualizer.py shells out to: virsh, virt-install,
 # curl, uuidgen, ssh — plus qemu tools and jq for --json consumers.
+
+# Concrete KVM host package per architecture. 'qemu-kvm' is not a portable
+# name: it only exists on x86 and, since Ubuntu 26.04, it is a purely virtual
+# package offered by BOTH qemu-system-x86 and qemu-system-x86-hwe — apt-get
+# then refuses to choose and fails with "no installation candidate". Unknown
+# architectures fall back to 'qemu-kvm' plus resolve_package()'s provider
+# selection below.
+case "$(uname -m)" in
+  x86_64)  QEMU_PKG=qemu-system-x86 ;;
+  aarch64) QEMU_PKG=qemu-system-arm ;;
+  ppc64le) QEMU_PKG=qemu-system-ppc ;;
+  s390x)   QEMU_PKG=qemu-system-s390x ;;
+  riscv64) QEMU_PKG=qemu-system-riscv64 ;;
+  *)       QEMU_PKG=qemu-kvm ;;
+esac
+
 declare -a BASE_PACKAGES=(
-  # KVM / qemu
-  qemu-kvm
+  # KVM / qemu (the system emulator that runs guests on the KVM accelerator)
+  "${QEMU_PKG}"
   qemu-utils
   cpu-checker            # kvm-ok
   # libvirt
@@ -156,7 +184,29 @@ apply_as_root() {
   run_as_root "$@"
 }
 
-vir_apply() { apply_as_root vir "$@"; }
+# Mutating virsh call. The privilege decision lives inside vir(), NOT in
+# apply_as_root: sudo execs an external binary, so `apply_as_root vir …` looks
+# for a program named "vir" and dies with "sudo: vir: command not found".
+# --quiet also silences stderr, for calls whose failure is expected (already
+# active). Suppression happens here and NOT as a `>/dev/null` on the call site:
+# that would swallow the --check preview too.
+vir_apply() {
+  local quiet=false
+  if [[ "${1:-}" == "--quiet" ]]; then quiet=true; shift; fi
+
+  if [[ "${CHECK_ONLY}" == true ]]; then
+    local preview="virsh -c ${VIRSH_URI} $*"
+    if [[ "${VIRSH_PRIV}" == root ]]; then preview="sudo ${preview}"; fi
+    info "[check] would run: ${preview}"
+    return 0
+  fi
+
+  if [[ "${quiet}" == true ]]; then
+    vir "$@" >/dev/null 2>&1
+  else
+    vir "$@" >/dev/null
+  fi
+}
 
 # Every virsh call targets the SYSTEM instance explicitly: the default URI of a
 # non-root user is qemu:///session, which would silently configure the wrong
@@ -199,6 +249,38 @@ package_version() {
   dpkg-query -W -f='${Version}' "$1" 2>/dev/null || echo "unknown"
 }
 
+# Map a requested package name to a concrete installable one. Handles names
+# that are virtual in the current release — e.g. qemu-kvm on Ubuntu 26.04,
+# where qemu-system-x86 and qemu-system-x86-hwe both Provide it and apt-get
+# refuses to pick among several providers. Rules: a name with its own
+# candidate maps to itself; a virtual name maps to a provider — an
+# already-installed one first (re-runs never churn or double-install), else
+# the alphabetically first, which prefers 'base' over 'base-hwe'-style
+# variants. Returns 1 when nothing installable exists.
+resolve_package() {
+  local pkg="$1" candidate provider
+  local -a providers=()
+
+  candidate=$(apt-cache policy "${pkg}" 2>/dev/null | awk '/^  Candidate:/{print $2}')
+  if [[ -n "${candidate}" && "${candidate}" != "(none)" ]]; then
+    printf '%s\n' "${pkg}"
+    return 0
+  fi
+
+  mapfile -t providers < <(apt-cache showpkg "${pkg}" 2>/dev/null \
+    | sed -n '/^Reverse Provides:/,$p' \
+    | awk 'NR > 1 && $1 != "" && !seen[$1]++ { print $1 }')
+  [[ ${#providers[@]} -gt 0 ]] || return 1
+
+  for provider in "${providers[@]}"; do
+    if is_package_installed "${provider}"; then
+      printf '%s\n' "${provider}"
+      return 0
+    fi
+  done
+  printf '%s\n' "${providers[@]}" | sort | head -n1
+}
+
 user_in_group() {
   id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$2"
 }
@@ -230,9 +312,6 @@ else
   warn "/dev/kvm missing — enable VT-x/AMD-V (firmware) and load the kvm modules; install continues"
 fi
 
-command -v uv >/dev/null 2>&1 \
-  || warn "uv is not installed (needed for 'uv run virt-runner'): curl -LsSf https://astral.sh/uv/install.sh | sh"
-
 # -----------------------------------------------------------------------------
 # Packages
 # -----------------------------------------------------------------------------
@@ -245,9 +324,23 @@ for pkg in "${PACKAGES[@]}"; do
   if is_package_installed "${pkg}"; then
     TO_UPGRADE+=("${pkg}")
     info "installed: ${pkg} ($(package_version "${pkg}"))"
+    continue
+  fi
+  # Not installed under its own name: it may be a virtual name whose provider
+  # is already present (idempotent re-runs) — resolve before deciding.
+  concrete=$(resolve_package "${pkg}") || concrete=""
+  if [[ -z "${concrete}" ]]; then
+    finding "no installation candidate for '${pkg}' on this release/architecture"
+    continue
+  fi
+  via=""
+  [[ "${concrete}" != "${pkg}" ]] && via=" -> ${concrete}"
+  if is_package_installed "${concrete}"; then
+    TO_UPGRADE+=("${concrete}")
+    info "installed: ${pkg}${via} ($(package_version "${concrete}"))"
   else
-    TO_INSTALL+=("${pkg}")
-    info "missing:   ${pkg}"
+    TO_INSTALL+=("${concrete}")
+    info "missing:   ${pkg}${via}"
   fi
 done
 
@@ -269,6 +362,40 @@ if [[ ${#TO_UPGRADE[@]} -gt 0 ]]; then
       || warn "upgrade failed for some packages (continuing; existing versions are adequate)"
     success "Packages upgraded"
   fi
+fi
+
+# -----------------------------------------------------------------------------
+# uv — the Python package manager virt-runner itself is launched with. It is
+# a per-user tool (~/.local/bin), so it is handled after the apt phase and
+# installed as the invoking user, never as root. The prompt is skipped in
+# --check mode and whenever no terminal is attached.
+# -----------------------------------------------------------------------------
+
+# Official astral installer. When the script itself was started through sudo,
+# drop back to the real user so uv lands in their ~/.local/bin, not /root's.
+install_uv() {
+  if [[ "${EUID}" -eq 0 && -n "${SUDO_USER:-}" ]]; then
+    sudo -Hu "${SUDO_USER}" sh -c 'curl -LsSf https://astral.sh/uv/install.sh | sh'
+  else
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+  fi
+}
+
+step "uv (required for 'uv run virt-runner')"
+
+if command -v uv >/dev/null 2>&1; then
+  success "uv present ($(uv --version 2>/dev/null | head -1))"
+elif [[ "${CHECK_ONLY}" == true ]]; then
+  warn "uv is not installed: curl -LsSf https://astral.sh/uv/install.sh | sh"
+elif ask_yes_no "uv is not installed. Install it now from astral.sh (official installer)?"; then
+  if install_uv; then
+    success "uv installed into ~/.local/bin"
+    info "if 'uv' is not on PATH yet: open a new shell, or run  . \"\$HOME/.local/bin/env\""
+  else
+    warn "uv installer failed — install manually: curl -LsSf https://astral.sh/uv/install.sh | sh"
+  fi
+else
+  info "skipped — install later: curl -LsSf https://astral.sh/uv/install.sh | sh"
 fi
 
 # -----------------------------------------------------------------------------
@@ -301,12 +428,12 @@ if table_has "net-list --all" "${VIRT_NET_NAME}"; then
 else
   [[ -f /usr/share/libvirt/networks/default.xml ]] \
     || finding "network '${VIRT_NET_NAME}' is missing and /usr/share/libvirt/networks/default.xml is unavailable"
-  vir_apply net-define /usr/share/libvirt/networks/default.xml >/dev/null
-  success "defined network '${VIRT_NET_NAME}'"
+  vir_apply net-define /usr/share/libvirt/networks/default.xml
+  [[ "${CHECK_ONLY}" == true ]] || success "defined network '${VIRT_NET_NAME}'"
 fi
 
-vir_apply net-autostart "${VIRT_NET_NAME}" >/dev/null 2>&1 || true
-vir_apply net-start "${VIRT_NET_NAME}" >/dev/null 2>&1 || true
+vir_apply --quiet net-autostart "${VIRT_NET_NAME}" || true
+vir_apply --quiet net-start "${VIRT_NET_NAME}" || true
 
 if table_has "net-list" "${VIRT_NET_NAME}"; then
   success "network '${VIRT_NET_NAME}' active"
@@ -325,13 +452,17 @@ if table_has "pool-list --all" "${VIRT_POOL_NAME}"; then
   info "pool '${VIRT_POOL_NAME}' already defined at ${pool_path:-unknown}"
 else
   apply_as_root install -d -m 0755 "${VIRT_POOL_DIR}"
-  vir_apply pool-define-as "${VIRT_POOL_NAME}" dir - - "${VIRT_POOL_DIR}" "" >/dev/null
-  vir_apply pool-build "${VIRT_POOL_NAME}" >/dev/null 2>&1 || true
-  success "defined pool '${VIRT_POOL_NAME}' at ${VIRT_POOL_DIR}"
+  # Explicit flags: the positional form of pool-define-as is
+  # name type source-host source-path source-dev source-name target, so the
+  # bare "dir - - <dir> ''" form put the directory into source-dev and failed
+  # on the empty source-name argument.
+  vir_apply pool-define-as --name "${VIRT_POOL_NAME}" --type dir --target "${VIRT_POOL_DIR}"
+  vir_apply --quiet pool-build "${VIRT_POOL_NAME}" || true
+  [[ "${CHECK_ONLY}" == true ]] || success "defined pool '${VIRT_POOL_NAME}' at ${VIRT_POOL_DIR}"
 fi
 
-vir_apply pool-autostart "${VIRT_POOL_NAME}" >/dev/null 2>&1 || true
-vir_apply pool-start "${VIRT_POOL_NAME}" >/dev/null 2>&1 || true
+vir_apply --quiet pool-autostart "${VIRT_POOL_NAME}" || true
+vir_apply --quiet pool-start "${VIRT_POOL_NAME}" || true
 
 if table_has "pool-list" "${VIRT_POOL_NAME}"; then
   success "pool '${VIRT_POOL_NAME}' active"

@@ -195,7 +195,7 @@ def access_commands(name: str, user_name: str | None, ip: str | None) -> dict[st
     return {
         "ssh_command": f"ssh {user_name}@{ip}" if (user_name and ip) else None,
         "console_command": f"virsh console {name}",
-        "teardown_command": f"vm-destroy {name}",
+        "teardown_command": f"virt-runner destroy {name}",
     }
 
 

@@ -1,4 +1,0 @@
-#!/usr/bin/env bash
-# Thin wrapper: delegates to the Python implementation.
-# Usage: vm-destroy <NAME>
-exec uv run --project "$(dirname "$0")/.." virt-runner destroy "$@"

@@ -29,6 +29,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -96,6 +97,11 @@ def _passthrough(cmd: list[str]) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
     )
+
+
+def _non_empty_file(path: Path) -> bool:
+    """True when *path* is a regular file with content."""
+    return path.is_file() and path.stat().st_size > 0
 
 
 def volume_name(name: str) -> str:
@@ -201,7 +207,7 @@ class Virtualizer:
     DEFAULT_IMAGE_BASE = "https://cloud-images.ubuntu.com"
     DEFAULT_RELEASE = "resolute"
     DEFAULT_USER = "ubuntu"
-    DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/id_ed25519.pub")
+    DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/virt_runner_key.pub")
     DEFAULT_LEASE_FILE = "/var/lib/libvirt/dnsmasq/virbr0.status"
 
     #: Poll cadence for the lease and SSH windows (PI-13).
@@ -281,13 +287,91 @@ class Virtualizer:
                 f"VM '{name}' already defined", "vm-already-defined", "preflight"
             )
 
-    def ssh_key_exists(self, path: str) -> None:
-        """Raise if the SSH key file is missing or empty."""
+    def ensure_ssh_key(self, path: str) -> str:
+        """Return *path* as a usable public key, generating the keypair if absent.
+
+        A missing key is created with ``ssh-keygen`` (ed25519, no passphrase),
+        so a first run on a fresh host needs no manual key setup. The private
+        half is *path* without the ``.pub`` suffix; when only that half
+        exists, the public key is re-derived from it with ``ssh-keygen -y``.
+        Empty placeholder files at either path are replaced.
+
+        Args:
+            path: Public key path (``--ssh-key``, default
+                :attr:`DEFAULT_SSH_KEY`).
+
+        Returns:
+            *path* unchanged, so the caller keeps using one value throughout.
+
+        Raises:
+            VirtError: ``ssh-key-missing`` when no key can be prepared at
+                *path*: it does not end in ``.pub`` (the private half would be
+                ambiguous), its directory cannot be created, or ``ssh-keygen``
+                failed — and no half-written keypair is left behind.
+        """
         key = Path(path)
-        if not key.is_file() or key.stat().st_size == 0:
+        if _non_empty_file(key):
+            return path
+
+        if not path.endswith(".pub"):
             raise VirtError(
-                f"ssh key not found: {path}", "ssh-key-missing", "preflight"
+                f"ssh key not found: {path} — cannot generate a keypair from "
+                "a path that does not end in .pub",
+                "ssh-key-missing",
+                "preflight",
             )
+        private = Path(path[: -len(".pub")])
+
+        key.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+        if _non_empty_file(private):
+            derived = _spawn(["ssh-keygen", "-y", "-f", str(private)])
+            if derived.returncode != 0 or not derived.stdout.strip():
+                raise VirtError(
+                    f"failed to derive the public key from {private}: "
+                    f"{(derived.stderr or derived.stdout).strip()}",
+                    "ssh-key-missing",
+                    "preflight",
+                )
+            key.write_text(f"{derived.stdout.strip()}\n")
+            output.progress(f"Derived public key from {private}: {path}")
+            return path
+
+        # Empty placeholders are replaced, not refused.
+        for stale in (private, key):
+            if stale.is_file() and stale.stat().st_size == 0:
+                stale.unlink()
+        private_existed = private.exists()
+        # stdin closed: ssh-keygen must never stop on an overwrite prompt.
+        generated = _spawn(
+            [
+                "ssh-keygen",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                f"virt-runner@{platform.node()}",
+                "-f",
+                str(private),
+            ],
+            input="",
+        )
+        if generated.returncode != 0 or not _non_empty_file(key):
+            if not private_existed:
+                # No half-written keypair behind (ssh-keygen writes priv first).
+                with suppress(OSError):
+                    private.unlink()
+                with suppress(OSError):
+                    key.unlink()
+            raise VirtError(
+                f"failed to generate ssh key {path}: "
+                f"{(generated.stderr or generated.stdout).strip()}",
+                "ssh-key-missing",
+                "preflight",
+            )
+        output.progress(f"Generated SSH keypair: {path}")
+        return path
 
     @staticmethod
     def host_arch() -> str:
