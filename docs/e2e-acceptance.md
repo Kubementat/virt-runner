@@ -1,6 +1,6 @@
 # E2E Acceptance Evidence (ticket 07 / slice S7)
 
-Full end-to-end acceptance of `bin/vm-create` + `bin/vm-destroy` on the real
+Full end-to-end acceptance of `virt-runner create` + `virt-runner destroy` on the real
 host, with the **real Resolute cloud image** (first real ~820 MiB download).
 Every command below was run for real on this host (libvirt 10.0.0,
 virt-install 4.1.0, Ubuntu 24.04 user `verfeinerer`, no sudo), on
@@ -86,7 +86,7 @@ definitively in §4.
 ## 3. State reset before the definitive pass
 
 ```console
-$ bin/vm-destroy poc-1
+$ virt-runner destroy poc-1
 VM 'poc-1' destroyed and disk removed.
 $ rm -rf ~/vm-images/resolute
 $ ssh-keygen -R 192.168.122.177   # stale host key of an earlier test VM IP
@@ -117,7 +117,7 @@ absent
 ### 4.1 STEP 1 (AC1 + positive AC3) — clean-state resolute creation
 
 ```console
-$ time bin/vm-create poc-1 --ram 2 --vcpu 1 --disk 10
+$ time virt-runner create poc-1 --ram 2 --vcpu 1 --disk 10
 image ready: /home/verfeinerer/vm-images/resolute/resolute-server-cloudimg-amd64.img
 cloud-init files generated: /tmp/tmp.ThdRQqNWdI (meta-data, user-data; id=4f2eaba1-4494-4954-a9a1-3464efd600b5)
 WARNING  Requested memory 2048 MiB is less than the recommended 3072 MiB for OS ubuntu24.04
@@ -193,8 +193,8 @@ $ jq -c '.[] | select(.hostname == "poc-1")' /var/lib/libvirt/dnsmasq/virbr0.sta
 Exact same command, immediately re-run:
 
 ```console
-$ time bin/vm-create poc-1 --ram 2 --vcpu 1 --disk 10
-vm-create: VM 'poc-1' already defined
+$ time virt-runner create poc-1 --ram 2 --vcpu 1 --disk 10
+virt-runner: VM 'poc-1' already defined
 
 real	0m0.018s
 # exit=1
@@ -214,7 +214,7 @@ $ stat -c '%y %s %n' ~/vm-images/resolute/resolute-server-cloudimg-amd64.img   #
 $ sha256sum ~/vm-images/resolute/resolute-server-cloudimg-amd64.img           # BEFORE
 9dc7c5363c0146a08ba0c9aa834d82c2c6dfbb1c471ad9a2f0aba1189e21be05  .../resolute-server-cloudimg-amd64.img
 
-$ bin/vm-create poc-2 --ram 1 --vcpu 1 --disk 5
+$ virt-runner create poc-2 --ram 1 --vcpu 1 --disk 5
 image ready: /home/verfeinerer/vm-images/resolute/resolute-server-cloudimg-amd64.img
 cloud-init files generated: /tmp/tmp.BaK6JSoMAV (meta-data, user-data; id=3dc8e796-de54-43c3-a9ee-4969b13d570b)
 WARNING  Requested memory 1024 MiB is less than the recommended 3072 MiB for OS ubuntu24.04
@@ -257,7 +257,7 @@ guest, while the host's SSH probe uses the default `~/.ssh` identities —
 none of which the guest authorizes. The probe must (and did) fail:
 
 ```console
-$ time bin/vm-create poc-3 --ram 1 --vcpu 1 --disk 5 --ssh-key /tmp/.../poc3key.pub
+$ time virt-runner create poc-3 --ram 1 --vcpu 1 --disk 5 --ssh-key /tmp/.../poc3key.pub
 image ready: /home/verfeinerer/vm-images/resolute/resolute-server-cloudimg-amd64.img
 cloud-init files generated: /tmp/tmp.k87IMwbPo2 (meta-data, user-data; id=6d8b7ece-5391-4af0-8252-2a07796ba546)
 WARNING  Requested memory 1024 MiB is less than the recommended 3072 MiB for OS ubuntu24.04
@@ -273,7 +273,7 @@ Running text console command: virsh --connect qemu:///system console poc-3
 Domain creation completed.
 VM 'poc-3' created (assigned MAC: 52:54:00:40:76:d6)
 IP acquired: 192.168.122.103
-vm-create: SSH to ubuntu@192.168.122.103 not reachable yet — check: virsh console poc-3
+virt-runner: SSH to ubuntu@192.168.122.103 not reachable yet — check: virsh console poc-3
 
 real	1m47.019s
 # exit=1
@@ -314,13 +314,13 @@ manual check**, not part of this ticket.
 Teardown:
 
 ```console
-$ bin/vm-destroy poc-1
+$ virt-runner destroy poc-1
 VM 'poc-1' destroyed and disk removed.
 # exit=0
-$ bin/vm-destroy poc-2
+$ virt-runner destroy poc-2
 VM 'poc-2' destroyed and disk removed.
 # exit=0
-$ bin/vm-destroy poc-3
+$ virt-runner destroy poc-3
 VM 'poc-3' destroyed and disk removed.
 # exit=0
 $ ls -la /etc/libvirt/qemu/autostart/
@@ -375,7 +375,7 @@ printed JSON array** of lease objects, with each value on its own line:
 - Stale leases of deleted VMs persist until renewed/expired (visible in
   the first-pass capture: `poc-s5`, `poc-s6` from earlier tickets sat
   alongside live leases) — the strict per-MAC match makes that harmless.
-- The parser in `bin/vm-create` (`find_ip_for_mac`: `jq`, with a
+- The parser in `virt-runner create` (`find_ip_for_mac`: `jq`, with a
   `python3` fallback, plus a legacy 2/3-column space-separated fallback
   for older libvirt/dnsmasq variants) was confirmed working **again with
   the real resolute image** — all three definitive VMs got their IP from
@@ -451,13 +451,13 @@ attempts.
 
 ## 6. Hardening changes applied in this ticket
 
-`bin/vm-create` (only script touched; `bin/vm-destroy` needed no
+`virt-runner create` (only script touched; `virt-runner destroy` needed no
 changes):
 
 1. **SSH verification window widened from ~60 s to ~90 s**
    (`verify_ssh_reachable`: 30 → 45 attempts at 2 s cadence). Rationale:
    ticket 06 observed one real boot where the guest needed slightly
-   longer than the built-in 60 s window (vm-create exited 1 after
+   longer than the built-in 60 s window (virt-runner create exited 1 after
    printing the IP — the failure path). Everything else (2 s cadence,
    `BatchMode`, `accept-new`, success block only after proven SSH,
    timeout error naming `virsh console <NAME>`) is unchanged. This is
@@ -465,9 +465,9 @@ changes):
    (autostart) concluded the committed flow was already correct.
 
 Post-change re-verification (quick paths): `bash -n` OK on both
-scripts; `bin/vm-create` (no NAME) → usage, **exit 2**;
-`bin/vm-destroy` (no arg) → usage, **exit 2**;
-`bin/vm-destroy poc-never-existed` → `VM 'poc-never-existed' is not
+scripts; `virt-runner create` (no NAME) → usage, **exit 2**;
+`virt-runner destroy` (no arg) → usage, **exit 2**;
+`virt-runner destroy poc-never-existed` → `VM 'poc-never-existed' is not
 defined`, **exit 1**. And the full acceptance sequence above ran with
 this final script.
 

@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Severity** | High (data-plane contract violation: `--disk N` does not produce an N GiB disk) |
-| **Component** | `bin/vm-create`, step 4 (pool volume import) |
+| **Component** | `virt-runner create`, step 4 (pool volume import) |
 | **Discovered** | 2026-08-25 |
 | **Fixed** | 2026-08-26 |
 | **Status** | Fixed and verified end-to-end |
@@ -15,8 +15,8 @@
 Created VMs with an explicit 10 GiB disk:
 
 ```
-bin/vm-create test-1 --ram 2 --vcpu 1 --disk 10
-bin/vm-create test-2 --ram 2 --vcpu 1 --disk 10
+virt-runner create test-1 --ram 2 --vcpu 1 --disk 10
+virt-runner create test-2 --ram 2 --vcpu 1 --disk 10
 ```
 
 Both VMs booted and were reachable via SSH, but inside the guest the disk was
@@ -51,7 +51,7 @@ Nothing failed: the script exited 0, printed success output, and the VM
    Capacity:  3758096384   (= 3.50 GiB, not 10 GiB)
    ```
 
-   The *host-side* volume is already wrong, so the bug is in `vm-create`, not
+   The *host-side* volume is already wrong, so the bug is in `virt-runner create`, not
    in the guest.
 
 2. **Volume inspection** — `virsh vol-info test-1_vda.qcow2 vm-pool`:
@@ -73,7 +73,7 @@ Nothing failed: the script exited 0, printed success output, and the VM
 
    Volume creation is fine.
 
-4. **Reproducing with the actual script** — `bin/vm-create dbg-disk-test
+4. **Reproducing with the actual script** — `virt-runner create dbg-disk-test
    --ram 2 --vcpu 1 --disk 10 --no-boot` produced a **3.50 GiB** volume.
    The bug is inside the script's create-then-import sequence.
 
@@ -139,7 +139,7 @@ Two compounding facts:
 
 ## 5. The fix
 
-`bin/vm-create`, step 4 — restore the contracted capacity explicitly after
+`virt-runner create`, step 4 — restore the contracted capacity explicitly after
 the upload:
 
 ```bash
@@ -178,7 +178,7 @@ acceptable for this PoC.
 
 1. Cache reset: `rm ~/vm-images/resolute/{resolute-server-cloudimg-amd64.img,SHA256SUMS}`
    → re-downloaded and SHA256-verified by the script.
-2. `bin/vm-create dbg-disk-test --ram 2 --vcpu 1 --disk 10` → exit 0.
+2. `virt-runner create dbg-disk-test --ram 2 --vcpu 1 --disk 10` → exit 0.
 3. Host side: `virsh vol-info dbg-disk-test_vda.qcow2 vm-pool` →
    **Capacity: 10.00 GiB** ✓
 4. Guest side (SSH):
@@ -202,7 +202,7 @@ acceptable for this PoC.
 Existing VMs (e.g. `test-1`, `test-2`) keep their shrunken disks until
 migrated. Two options:
 
-- **Recreate (clean):** `bin/vm-destroy <vm> && bin/vm-create <vm> [same options]`
+- **Recreate (clean):** `virt-runner destroy <vm> && virt-runner create <vm> [same options]`
 - **Live resize:** `virsh vol-resize <vm>_vda.qcow2 <N>G vm-pool`, then in
   the guest: `sudo growpart /dev/vda 1 && sudo resize2fs /dev/vda1`
 
