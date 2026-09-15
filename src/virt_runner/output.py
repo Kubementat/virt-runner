@@ -186,14 +186,26 @@ def fail(
     raise SystemExit(exit_code)
 
 
-def access_commands(name: str, user_name: str | None, ip: str | None) -> dict[str, Any]:
+def access_commands(
+    name: str,
+    user_name: str | None,
+    ip: str | None,
+    identity: str | None = None,
+) -> dict[str, Any]:
     """The ``ssh``/``console``/``teardown`` command trio of a VM (spec §5.3).
 
     ``ssh_command`` is ``None`` when there is no IP to reach the guest on or no
     user to log in as — a null in JSON beats a "(unavailable)" string to parse.
+    *identity* is the private key to log in with; it is carried in the command
+    so the line works copy-pasted, without the user wiring the key into
+    ``~/.ssh/config``.
     """
+    ssh = None
+    if user_name and ip:
+        key_opt = f" -i {identity}" if identity else ""
+        ssh = f"ssh{key_opt} {user_name}@{ip}"
     return {
-        "ssh_command": f"ssh {user_name}@{ip}" if (user_name and ip) else None,
+        "ssh_command": ssh,
         "console_command": f"virsh console {name}",
         "teardown_command": f"virt-runner destroy {name}",
     }

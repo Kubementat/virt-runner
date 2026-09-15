@@ -12,7 +12,7 @@ from virt_runner.args import command
 from virt_runner.virtualizer import IP_STATUS_LEASE, Virtualizer, VmInfo
 
 
-def _vm_document(vm: VmInfo, display_user: str) -> dict[str, Any]:
+def _vm_document(vm: VmInfo, display_user: str, identity: str) -> dict[str, Any]:
     """JSON view of one ``list_vms`` entry (spec §5.3.3).
 
     Only a leased address is reported: ``ip``/``ssh_user``/``ssh_command`` are
@@ -30,11 +30,11 @@ def _vm_document(vm: VmInfo, display_user: str) -> dict[str, Any]:
         "ip": ip,
         "ip_status": vm.ip_status,
         "ssh_user": ssh_user,
-        **output.access_commands(vm.name, ssh_user, ip),
+        **output.access_commands(vm.name, ssh_user, ip, identity),
     }
 
 
-def _text_block(vm: VmInfo, display_user: str) -> list[str]:
+def _text_block(vm: VmInfo, display_user: str, identity: str) -> list[str]:
     """The §4.6 block of one VM: headline/Name/IP/SSH/Console/Teardown.
 
     Reads the same :class:`~virt_runner.virtualizer.VmInfo` as
@@ -44,7 +44,7 @@ def _text_block(vm: VmInfo, display_user: str) -> list[str]:
         headline = "VM running."
         if vm.ip:
             ip_line = f"IP:      {vm.ip}   (also reachable as {vm.name}.default)"
-            ssh_line = f"SSH:     ssh {display_user}@{vm.ip}"
+            ssh_line = f"SSH:     ssh -i {identity} {display_user}@{vm.ip}"
         else:
             ip_line = "IP:      (no DHCP lease found yet)"
             ssh_line = "SSH:     (unavailable — no IP yet)"
@@ -76,6 +76,7 @@ def cmd_list(user: str, as_json: bool) -> None:
     """List VMs configured by vm-create (disk in the vm-pool)."""
     output.set_json_mode(as_json)
     v = Virtualizer()
+    identity = Virtualizer.private_key_path(Virtualizer.DEFAULT_SSH_KEY)
 
     # Preflight, narrowed to what listing needs: libvirt reachable and the
     # pool *defined* (an inactive pool still has listable VMs). The network is
@@ -104,7 +105,7 @@ def cmd_list(user: str, as_json: bool) -> None:
                 "pool": v.POOL,
                 "display_user": user,
                 "count": len(vms),
-                "vms": [_vm_document(vm, user) for vm in vms],
+                "vms": [_vm_document(vm, user, identity) for vm in vms],
             },
         )
         return
@@ -116,5 +117,5 @@ def cmd_list(user: str, as_json: bool) -> None:
         return
 
     for vm in vms:
-        for line in _text_block(vm, user):
+        for line in _text_block(vm, user, identity):
             click.echo(line)

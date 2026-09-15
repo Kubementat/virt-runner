@@ -61,7 +61,9 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
             "ip": ip,
             "dns_name": f"{name}.default",
             "ssh_user": run_state["user"],
-            **output.access_commands(name, run_state["user"], ip),
+            **output.access_commands(
+                name, run_state["user"], ip, run_state["ssh_identity"]
+            ),
             # virt-install is always invoked with --autostart.
             "autostart": True,
         }
@@ -175,6 +177,7 @@ def cmd_create(
         "vcpu": vcpu,
         "disk_gib": disk,
         "user": user,
+        "ssh_identity": v.private_key_path(ssh_key),
         "image_url": image_url,
         "booted": False,
         "created": False,
@@ -335,7 +338,7 @@ def cmd_create(
     output.progress(f"IP acquired: {ip}")
 
     try:
-        v.verify_ssh_reachable(name, user, ip)
+        v.verify_ssh_reachable(name, user, ip, identity=run_state["ssh_identity"])
     except RuntimeError as exc:
         output.fail_with(
             "create",

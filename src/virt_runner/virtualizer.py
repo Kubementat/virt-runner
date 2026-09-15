@@ -230,6 +230,11 @@ class Virtualizer:
                 return True
         return False
 
+    @staticmethod
+    def private_key_path(pub_path: str) -> str:
+        """The private half of a keypair: *pub_path* without ``.pub``."""
+        return pub_path.removesuffix(".pub")
+
     def domain_exists(self, name: str) -> bool:
         """True if *name* is a defined domain (``virsh dominfo`` succeeds)."""
         return _spawn(["virsh", "dominfo", name]).returncode == 0
@@ -975,9 +980,17 @@ class Virtualizer:
         name: str,
         user: str,
         ip: str,
+        identity: str | None = None,
         timeout_s: int = 90,
     ) -> None:
         """Verify SSH connectivity (PI-13: success requires a round-trip).
+
+        *identity* is the private key injected into the guest — without it the
+        probe falls back to the caller's default identities and cannot
+        authenticate against a freshly created VM. Host keys are checked
+        against ``/dev/null``: DHCP hands these IPs out to throwaway guests,
+        so a reused address legitimately presents a new host key and must not
+        fail verification (nor pollute the user's ``known_hosts``).
 
         Raises:
             VirtError: ``ssh-timeout`` when no attempt succeeds.
@@ -989,7 +1002,12 @@ class Virtualizer:
             "-o",
             "BatchMode=yes",
             "-o",
-            "StrictHostKeyChecking=accept-new",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            *(
+                ["-i", identity, "-o", "IdentitiesOnly=yes"] if identity else []
+            ),
             f"{user}@{ip}",
             "exit",
         ]
