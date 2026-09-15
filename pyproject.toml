@@ -1,7 +1,7 @@
 [project]
 name = "virt-runner"
 version = "0.2.0"
-description = "One-command Ubuntu KVM VM creation via libvirt + cloud-init"
+description = "One-command KVM VM creation via libvirt + cloud-init"
 requires-python = ">=3.10"
 dependencies = [
     "click>=8.0",

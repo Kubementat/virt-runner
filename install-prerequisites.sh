@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # =============================================================================
-# install-prereqs.sh — Install the host prerequisites for virt-runner
+# install-prerequisites.sh — Install the host prerequisites for virt-runner
 # =============================================================================
 #
 # Description:
@@ -21,9 +21,9 @@
 # Supports: Ubuntu / Debian (apt-get). Uses sudo internally (or runs as root).
 #
 # Usage:
-#   ./bin/install-prereqs.sh                 # install + configure
-#   ./bin/install-prereqs.sh --check         # audit only, change nothing
-#   ./bin/install-prereqs.sh --with-virt-manager
+#   ./bin/install-prerequisites.sh                 # install + configure
+#   ./bin/install-prerequisites.sh --check         # audit only, change nothing
+#   ./bin/install-prerequisites.sh --with-virt-manager
 #
 # Environment variables (all optional):
 #   VIRT_USERNAME    User to add to libvirt/kvm (default: $SUDO_USER, else $USER)
