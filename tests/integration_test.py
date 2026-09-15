@@ -3,7 +3,7 @@
 Run with: uv run tests/integration_test.py
 
 Flow: create 2 VMs -> list (expect 2) -> ssh hello world in each ->
-destroy both -> list (expect 0).
+ssh <name> session in each -> destroy both -> list (expect 0).
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ def virt_runner(*args: str, allow_fail: bool = False) -> dict:
         capture_output=True,
         text=True,
         check=False,
+        stdin=subprocess.DEVNULL,
     )
     try:
         doc = json.loads(proc.stdout)
@@ -91,6 +92,13 @@ def main() -> None:
         world = f"hello-{vm['name']}"
         ssh_hello(world, vm["ssh_command"])
         check(True, f"hello world ran in {vm['name']} via {vm['ssh_command']}")
+
+    # 3b. `ssh <name>` opens a real session in the VM — stdin is /dev/null,
+    # so the remote shell sees EOF and exits 0; a non-zero exit fails the run.
+    for name in NAMES:
+        doc = virt_runner("ssh", name)
+        check(doc["status"] == "success", f"ssh session into {name} closed cleanly")
+        check(doc["exit_code"] == 0, f"ssh session into {name} exited 0")
 
     # 4. Destroy both.
     for name in NAMES:

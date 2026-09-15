@@ -1047,6 +1047,58 @@ class Virtualizer:
         )
 
     # ------------------------------------------------------------------
+    # Access
+    # ------------------------------------------------------------------
+
+    def vm_ip(self, name: str, lease_file: str) -> str | None:
+        """Current address of a running domain, or ``None``.
+
+        Non-blocking counterpart of :meth:`wait_for_ip` — used by ``ssh``
+        against VMs that booted long ago: the DHCP lease first, then a
+        single ``domifaddr`` sweep (which may report the address with a
+        ``/prefix`` suffix, so it is matched anywhere in the line and
+        stripped).
+        """
+        mac = self._first_mac(name)
+        ip = self.find_ip_for_mac(lease_file, mac) if mac else None
+        if ip:
+            return ip
+        listing = _stdout(["virsh", "domifaddr", name])
+        for line in listing.splitlines():
+            match = re.search(r"\b\d+\.\d+\.\d+\.\d+\b", line)
+            if match:
+                return match.group(0)
+        return None
+
+    def ssh_shell(self, user: str, ip: str, identity: str | None = None) -> int:
+        """Open an interactive ssh session; return ssh's exit code.
+
+        stdio is inherited so the user gets a real shell; under ``--json``
+        — like :func:`_passthrough` — stdout is steered to stderr so the
+        result document stays the only thing on stdout. Host keys are
+        handled like :meth:`verify_ssh_reachable`: DHCP recycles these
+        addresses between throwaway guests.
+        """
+        cmd = [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            *(
+                ["-i", identity, "-o", "IdentitiesOnly=yes"] if identity else []
+            ),
+            f"{user}@{ip}",
+        ]
+        return subprocess.run(
+            cmd,
+            stdout=sys.stderr if output.is_json_mode() else None,
+            stderr=None,
+            check=False,
+            env=_CHILD_ENV,
+        ).returncode
+
+    # ------------------------------------------------------------------
     # List
     # ------------------------------------------------------------------
 

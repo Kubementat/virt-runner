@@ -5,8 +5,8 @@
 `virt-runner create myvm` downloads (once, then caches) and verifies an Ubuntu cloud image,
 boots it, injects an SSH key (generated automatically when absent), waits for the DHCP lease,
 proves SSH works with a real round-trip, and prints copy-paste-ready access commands.
-`destroy` removes VM and disk. `list` shows what the tool created. Every command also
-speaks JSON via `--json`.
+`destroy` removes VM and disk. `list` shows what the tool created. `ssh NAME` drops you
+straight into a shell on the VM. Every command also speaks JSON via `--json`.
 
 Python (stdlib + `click`); all host interaction via `virsh`, `virt-install`, `curl`, `ssh`.
 No libvirt bindings, no prompts, no sudo at run time.
@@ -20,8 +20,8 @@ No libvirt bindings, no prompts, no sudo at run time.
 # 1. Create a VM (~2 min cold, ~20 s on a warm image cache)
 uv run virt-runner create myvm
 
-# 2. SSH in — use the command the create output prints
-ssh -i ~/.ssh/virt_runner_key ubuntu@192.168.122.x
+# 2. SSH in
+uv run virt-runner ssh myvm
 
 # 3. Done
 uv run virt-runner destroy myvm
@@ -40,9 +40,11 @@ uv run virt-runner create NAME   # build + boot; --ram/--vcpu GiB/ count, --disk
                                  # --ssh-key, --no-boot, --keep-going
 uv run virt-runner destroy NAME  # undefine + delete disk (idempotent)
 uv run virt-runner list          # only VMs whose disk lives in vm-pool
+uv run virt-runner ssh NAME      # interactive shell (resolves IP, uses the injected key;
+                                 # --user to log in as someone else)
 ```
 
-All three accept `--json`: stdout carries **exactly one** JSON document (success *or* error
+All four accept `--json`: stdout carries **exactly one** JSON document (success *or* error
 envelope), everything else goes to stderr. `VM_JSON_TRACE=1` re-sends progress lines to
 stderr for debugging. Envelope schema: `specification/python-rewrite.md` §5.
 
@@ -53,8 +55,8 @@ uv run virt-runner create myvm --json | jq -r .vm.ssh_command
 ## Integration test
 
 `tests/integration_test.py` is an end-to-end suite against the real host: creates two VMs,
-lists them, runs a hello world via SSH in each (using the reported `ssh_command`), destroys
-both, and verifies they're gone. Every call goes through `--json`, so it also enforces that
+lists them, runs a hello world via SSH in each (using the reported `ssh_command`), opens a
+`ssh <name>` session into each, destroys both, and verifies they're gone. Every call goes through `--json`, so it also enforces that
 stdout stays valid JSON at every step.
 
 ```bash
