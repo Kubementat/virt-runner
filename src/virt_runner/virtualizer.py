@@ -45,9 +45,32 @@ from virt_runner.errors import VirtError
 USER_AGENT = f"virt-runner/{output.version()}"
 
 
+def _child_env() -> dict[str, str]:
+    """Environment for subprocesses, with our own venv's ``bin`` off ``PATH``.
+
+    Host tools may carry a ``#!/usr/bin/env python3`` shebang
+    (``virt-install`` does on Ubuntu 26.04). Started through ``uv run``,
+    ``PATH`` leads with the venv's isolated python, from which system
+    packages such as ``gi`` are invisible — so spawned tools must resolve
+    interpreters from the host PATH, never from ours.
+    """
+    env = dict(os.environ)
+    if sys.prefix != sys.base_prefix:
+        venv_bin = os.path.join(sys.prefix, "bin")
+        env["PATH"] = os.pathsep.join(
+            p for p in env.get("PATH", "").split(os.pathsep) if p != venv_bin
+        )
+    return env
+
+
+_CHILD_ENV = _child_env()
+
+
 def _spawn(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
     """Run *cmd*, returning the result whatever its exit code."""
-    return subprocess.run(cmd, capture_output=True, text=True, check=False, **kwargs)
+    return subprocess.run(
+        cmd, capture_output=True, text=True, check=False, env=_CHILD_ENV, **kwargs
+    )
 
 
 def _run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -96,6 +119,7 @@ def _passthrough(cmd: list[str]) -> subprocess.CompletedProcess[str]:
         stderr=None,
         text=True,
         check=False,
+        env=_CHILD_ENV,
     )
 
 
