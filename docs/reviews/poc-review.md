@@ -62,7 +62,7 @@ working tree clean at review time.
 ## 4. Review environment & method
 
 **When/where:** 2026-08-25 ~22:35–22:50 CET, on the target host (Ubuntu
-24.04, libvirt 10.0.0, virt-install 4.1.0, user `verfeinerer` in
+24.04, libvirt 10.0.0, virt-install 4.1.0, user `user` in
 `libvirt`+`kvm`, no sudo). Project at HEAD `a7cfe93`, working tree clean.
 
 **What I read in full:** spec v1.0, plan v1.0 (incl. updated §8),

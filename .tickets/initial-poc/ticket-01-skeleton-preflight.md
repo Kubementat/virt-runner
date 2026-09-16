@@ -8,7 +8,7 @@
 - **Spec sections:** §1 (purpose), §2 (environment requirements), §3.1 (CLI interface, exit codes, defaults), §4 step 1 (preflight), §9 (reference sketch — starting point only, not the deliverable), §6 pitfall 8 (libvirtd is socket-activated; do NOT check `systemctl is-active libvirtd`), §6 pitfall 9 (`setup-test-vm` must never be touched), decisions **D1** (`--release` overrides `--image` when both given), **D9** (output format authority), **D10** (default key path is `~/.ssh/id_ed25519.pub` — a dot is required).
 - **Plan sections:** §1 (ground rules: `#!/usr/bin/env bash` + `set -euo pipefail`; no new dependencies; exit codes 0/1/2; `poc-` prefix for all test VMs; testability hooks `VM_CREATE_CACHE_DIR` and `VM_CREATE_LEASE_FILE` must be documented in the script header even though S1 doesn't use them yet), §2 slice S1, §3 (commit message), §4 (safety rules).
 - **Environment facts (host-verified, plan §8):**
-  - Current user `verfeinerer` is in `libvirt` + `kvm` groups; all `virsh` commands work **without sudo** on `qemu:///system`.
+  - Current user `user` is in `libvirt` + `kvm` groups; all `virsh` commands work **without sudo** on `qemu:///system`.
   - Exactly one pre-existing domain: `setup-test-vm` (shut off). Pool `vm-pool` is active; network `default` is active. Never touch either beyond read-only checks.
   - `~/.ssh/id_ed25519.pub` **does not exist** on this host (drives a negative test below); `~/.ssh/id_rsa.pub` does exist and is usable as an alternate `--ssh-key` for the positive preflight test.
   - `virt-install` is 4.1.0, `curl`/`sha256sum`/`uuidgen` present; `/dev/kvm` present.
@@ -68,7 +68,7 @@ Run from the project root (`bin/vm-create` by relative path). Each bullet: comma
 
 ## Verification (run in this order)
 
-1. `cd /home/verfeinerer/dev/research/experiments/virt-runner && chmod +x bin/vm-create`
+1. `cd ~/virt-runner && chmod +x bin/vm-create`
 2. Record baseline state: `virsh list --all && virsh vol-list vm-pool` → only `setup-test-vm` / only `noble-server-cloudimg-amd64.img`.
 3. Run acceptance criteria 1–9 above one by one, checking both the exit code (`echo $?`) and the message.
 4. Run acceptance criterion 10 (state-unchanged check).

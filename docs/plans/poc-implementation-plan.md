@@ -463,7 +463,7 @@ destroyed.
 | Disk / KVM (extra) | 227 GiB free on `/` (`/dev/nvme0n1p8`, 856 G total); `/dev/kvm` present (`crw-rw----+ root kvm`) |
 | `python3`, `ssh`, `ssh-keygen` (extra) | All present (`/usr/bin/`) — S3 YAML checks and PD2 are viable |
 | Noble image (extra) | `/var/lib/libvirt/images/vms/noble-server-cloudimg-amd64.img` — 674 MiB, root-owned, **world-readable** → PD1 feasible |
-| Host | Ubuntu 24.04 user `verfeinerer` in `libvirt`+`kvm` groups (all `virsh` calls above ran without sudo); `libvirtd` socket-activated |
+| Host | Ubuntu 24.04 user `user` in `libvirt`+`kvm` groups (all `virsh` calls above ran without sudo); `libvirtd` socket-activated |
 
 **CONFIRMED lease-file format** (ticket 05 first real boot; re-confirmed on
 the real resolute image in ticket 07 — see `docs/e2e-acceptance.md` §5.1):
@@ -477,7 +477,7 @@ one object per lease, keys/values each on their own lines:
     "ip-address": "192.168.122.190",
     "mac-address": "52:54:00:be:b2:b1",
     "hostname": "poc-1",
-    "client-id": "ff:56:50:4d:98:00:02:00:00:ab:11:86:b7:eb:be:da:f5:e4:30",
+    "client-id": "ff:56:50:4d:98:00:00:00:00:00:00:00:00:00:00:00:00:00",
     "expiry-time": 1787691980
   }
 ]

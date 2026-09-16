@@ -3,7 +3,7 @@
 Full end-to-end acceptance of `virt-runner create` + `virt-runner destroy` on the real
 host, with the **real Resolute cloud image** (first real ~820 MiB download).
 Every command below was run for real on this host (libvirt 10.0.0,
-virt-install 4.1.0, Ubuntu 24.04 user `verfeinerer`, no sudo), on
+virt-install 4.1.0, Ubuntu 24.04 user `user`, no sudo), on
 2026-08-25. Output is verbatim except where noted ("trimmed").
 
 Acceptance-criteria status (spec §7):
@@ -118,7 +118,7 @@ absent
 
 ```console
 $ time virt-runner create poc-1 --ram 2 --vcpu 1 --disk 10
-image ready: /home/verfeinerer/vm-images/resolute/resolute-server-cloudimg-amd64.img
+image ready: ~/vm-images/resolute/resolute-server-cloudimg-amd64.img
 cloud-init files generated: /tmp/tmp.ThdRQqNWdI (meta-data, user-data; id=4f2eaba1-4494-4954-a9a1-3464efd600b5)
 WARNING  Requested memory 2048 MiB is less than the recommended 3072 MiB for OS ubuntu24.04
 
@@ -156,10 +156,10 @@ download proof + SHA256 verification:
 ```console
 $ ls -la ~/vm-images/resolute/
 total 840308
--rw-rw-r-- 1 verfeinerer verfeinerer 860447744 Aug 25 22:06 resolute-server-cloudimg-amd64.img
--rw-rw-r-- 1 verfeinerer verfeinerer      8492 Aug 25 22:06 SHA256SUMS
+-rw-rw-r-- 1 user user 860447744 Aug 25 22:06 resolute-server-cloudimg-amd64.img
+-rw-rw-r-- 1 user user      8492 Aug 25 22:06 SHA256SUMS
 $ du -h ~/vm-images/resolute/resolute-server-cloudimg-amd64.img
-821M  /home/verfeinerer/vm-images/resolute/resolute-server-cloudimg-amd64.img
+821M  ~/vm-images/resolute/resolute-server-cloudimg-amd64.img
 $ sha256sum ~/vm-images/resolute/resolute-server-cloudimg-amd64.img
 9dc7c5363c0146a08ba0c9aa834d82c2c6dfbb1c471ad9a2f0aba1189e21be05  .../resolute-server-cloudimg-amd64.img
 $ grep resolute-server-cloudimg-amd64.img ~/vm-images/resolute/SHA256SUMS
@@ -185,7 +185,7 @@ fixed MAC and a real `ssh ubuntu@192.168.122.190 exit` succeeded
 
 ```console
 $ jq -c '.[] | select(.hostname == "poc-1")' /var/lib/libvirt/dnsmasq/virbr0.status
-{"ip-address":"192.168.122.190","mac-address":"52:54:00:be:b2:b1","hostname":"poc-1","client-id":"ff:56:50:4d:98:00:02:00:00:ab:11:86:b7:eb:be:da:f5:e4:30","expiry-time":1787691980}
+{"ip-address":"192.168.122.190","mac-address":"52:54:00:be:b2:b1","hostname":"poc-1","client-id":"ff:56:50:4d:98:00:00:00:00:00:00:00:00:00:00:00:00:00","expiry-time":1787691980}
 ```
 
 ### 4.2 STEP 2 (AC5) — name-collision fail-fast
@@ -210,12 +210,12 @@ parameters:
 
 ```console
 $ stat -c '%y %s %n' ~/vm-images/resolute/resolute-server-cloudimg-amd64.img   # BEFORE
-2026-08-25 22:06:09.041851682 +0200 860447744 /home/verfeinerer/vm-images/resolute/resolute-server-cloudimg-amd64.img
+2026-08-25 22:06:09.041851682 +0200 860447744 ~/vm-images/resolute/resolute-server-cloudimg-amd64.img
 $ sha256sum ~/vm-images/resolute/resolute-server-cloudimg-amd64.img           # BEFORE
 9dc7c5363c0146a08ba0c9aa834d82c2c6dfbb1c471ad9a2f0aba1189e21be05  .../resolute-server-cloudimg-amd64.img
 
 $ virt-runner create poc-2 --ram 1 --vcpu 1 --disk 5
-image ready: /home/verfeinerer/vm-images/resolute/resolute-server-cloudimg-amd64.img
+image ready: ~/vm-images/resolute/resolute-server-cloudimg-amd64.img
 cloud-init files generated: /tmp/tmp.BaK6JSoMAV (meta-data, user-data; id=3dc8e796-de54-43c3-a9ee-4969b13d570b)
 WARNING  Requested memory 1024 MiB is less than the recommended 3072 MiB for OS ubuntu24.04
 
@@ -239,7 +239,7 @@ Teardown: vm-destroy poc-2   (or: virsh destroy poc-2 && virsh undefine poc-2)
 # exit=0   (total wall time: 13 s)
 
 $ stat -c '%y %s %n' ~/vm-images/resolute/resolute-server-cloudimg-amd64.img   # AFTER
-2026-08-25 22:06:09.041851682 +0200 860447744 /home/verfeinerer/vm-images/resolute/resolute-server-cloudimg-amd64.img
+2026-08-25 22:06:09.041851682 +0200 860447744 ~/vm-images/resolute/resolute-server-cloudimg-amd64.img
 $ sha256sum ~/vm-images/resolute/resolute-server-cloudimg-amd64.img           # AFTER
 9dc7c5363c0146a08ba0c9aa834d82c2c6dfbb1c471ad9a2f0aba1189e21be05  .../resolute-server-cloudimg-amd64.img
 ```
@@ -258,7 +258,7 @@ none of which the guest authorizes. The probe must (and did) fail:
 
 ```console
 $ time virt-runner create poc-3 --ram 1 --vcpu 1 --disk 5 --ssh-key /tmp/.../poc3key.pub
-image ready: /home/verfeinerer/vm-images/resolute/resolute-server-cloudimg-amd64.img
+image ready: ~/vm-images/resolute/resolute-server-cloudimg-amd64.img
 cloud-init files generated: /tmp/tmp.k87IMwbPo2 (meta-data, user-data; id=6d8b7ece-5391-4af0-8252-2a07796ba546)
 WARNING  Requested memory 1024 MiB is less than the recommended 3072 MiB for OS ubuntu24.04
 
@@ -361,7 +361,7 @@ printed JSON array** of lease objects, with each value on its own line:
     "ip-address": "192.168.122.190",
     "mac-address": "52:54:00:be:b2:b1",
     "hostname": "poc-1",
-    "client-id": "ff:56:50:4d:98:00:02:00:00:ab:11:86:b7:eb:be:da:f5:e4:30",
+    "client-id": "ff:56:50:4d:98:00:00:00:00:00:00:00:00:00:00:00:00:00",
     "expiry-time": 1787691980
   }
 ]

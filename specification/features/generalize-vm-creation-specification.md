@@ -2,7 +2,7 @@
 
 **Version:** 1.1 (draft)
 **Status:** Ready for planning — "verified" facts come from three passes: (a) direct `curl` probes of every image/sums URL and checksum-file content (2026-08-26), (b) a documentation research pass (official wikis/docs/kickstarts, cited inline in §5), and (c) an **aarch64/arm64 research pass (2026-08-26)**: live `curl` probes of every aarch64 image tree, alias, and sidecar listed in §5.10, followed by an **independent web-verification pass (2026-08-26, worker agents)** that re-probed all §5.10 image/sums facts, firmware package contents, and boot claims; corrections from that pass are folded in inline (notably the CentOS `latest`-alias finding in pitfall 3, the aarch64 firmware package/path correction in pitfall 18, and the per-arch cadence evidence in pitfall 20). Rows marked **verify-on-first-run** must still be confirmed on real guests during the implementation tickets.
-**Project root:** `/home/verfeinerer/dev/research/experiments/virt-runner`
+**Project root:** `~/virt-runner`
 **Supersedes:** nothing — this is an additive feature on top of `specification/specification.md` (v1.0, the POC contract, which remains authoritative for the unchanged pipeline steps).
 **Companion:** `.tickets/README.md` conventions (self-contained tickets, one commit each, `poc-` test names, full teardown).
 

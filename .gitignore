@@ -1,1 +1,37 @@
+# Python
 __pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+# NOTE: uv.lock is intentionally committed (reproducible builds); do NOT ignore it.
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local tooling / code index caches
+.codegraph/
+.pytest/
+
+# Environment / secrets (defence in depth — keep these out of VCS)
+.env
+.env.*
+*.local
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
