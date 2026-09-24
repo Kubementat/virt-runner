@@ -229,6 +229,10 @@ class Virtualizer:
 
     POOL = "vm-pool"
     NET = "default"
+    # Namespace of the per-VM metadata recorded at create time (libvirt's
+    # `virsh metadata`; the old setmeta/dommetadata are gone in libvirt 10).
+    METADATA_URI = "https://virt-runner.local/vm"
+    METADATA_KEY = "virt-runner"
     DEFAULT_USER = "ubuntu"
     DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/virt_runner_key.pub")
     DEFAULT_LEASE_FILE = "/var/lib/libvirt/dnsmasq/virbr0.status"
@@ -446,13 +450,12 @@ class Virtualizer:
 
         # Determine image path and verification settings.
         if release_given or not image_given:
-            # Standard release path.
-            img_url = profile.image_url(release)
-            img_basename = img_url.rsplit("/", 1)[-1]
+            # Standard release path (image_url is the profile's release URL).
+            img_basename = image_url.rsplit("/", 1)[-1]
             sums_url = (
-                img_url.rsplit("/", 1)[0] + "/SHA256SUMS"
+                image_url.rsplit("/", 1)[0] + "/SHA256SUMS"
                 if profile.sums_kind == "dir"
-                else img_url + ".SHA256"
+                else image_url + ".SHA256"
             )
             verifiable = True
             if profile.cache_prefix:
@@ -885,6 +888,43 @@ class Virtualizer:
     def get_domain_state(self, name: str) -> str:
         """Return the domain state string (``running``, ``shut off``, …)."""
         return _stdout(["virsh", "domstate", name]).strip()
+
+    def set_domain_metadata(self, name: str, distro: str, user: str) -> None:
+        """Record the guest distro/user in the domain's metadata.
+
+        Read back by ``ssh``/``list`` via :meth:`domain_user`, so both log in
+        as the user that was actually created on the guest.
+        """
+        xml = f'<virt-runner distro="{distro}" user="{user}"/>'
+        _run(
+            [
+                "virsh",
+                "metadata",
+                name,
+                self.METADATA_URI,
+                "--key",
+                self.METADATA_KEY,
+                "--set",
+                xml,
+            ]
+        )
+
+    def domain_user(self, name: str) -> str | None:
+        """The ``user`` from the domain's ``virt-runner`` metadata, else ``None``."""
+        m = re.search(
+            r'user="([^"]+)"',
+            _stdout(
+                [
+                    "virsh",
+                    "metadata",
+                    name,
+                    self.METADATA_URI,
+                    "--key",
+                    self.METADATA_KEY,
+                ]
+            ),
+        )
+        return m.group(1) if m else None
 
     # ------------------------------------------------------------------
     # IP discovery + SSH verification

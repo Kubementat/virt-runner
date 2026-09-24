@@ -74,16 +74,12 @@ def main() -> None:
     for name in ALL:
         virt_runner("destroy", name, allow_fail=True)
 
-    # 1. Create two VMs. The create document's ssh_command is kept: `list`
-    # has no per-VM user metadata (spec §4.6), so its ssh_command always
-    # carries `list`'s default user and is wrong for non-default users.
-    create_cmds: dict[str, str] = {}
+    # 1. Create two VMs.
     for name in NAMES:
         doc = virt_runner("create", "--ram", "1", "--vcpu", "1", "--disk", "8", name)
         check(doc["status"] == "success", f"create {name} succeeded")
         check(doc["booted"], f"{name} booted")
         check(doc["vm"]["ip"] is not None, f"{name} has an IP")
-        create_cmds[name] = doc["vm"]["ssh_command"]
 
     # 1b. Arch leg: distro profile, arch-boxes image + sidecar .SHA256,
     # wheel-group user `arch`, `generic` osinfo boot.
@@ -104,7 +100,6 @@ def main() -> None:
     check(doc["vm"]["distro"] == "arch", f"create {ARCH_NAME} reports distro arch")
     check(doc["vm"]["ssh_user"] == "arch", f"create {ARCH_NAME} uses user arch")
     check(doc["vm"]["ip"] is not None, f"{ARCH_NAME} has an IP")
-    create_cmds[ARCH_NAME] = doc["vm"]["ssh_command"]
 
     # 2. List -> our three VMs present (foreign VMs in the pool are none of
     # the suite's business).
@@ -114,24 +109,29 @@ def main() -> None:
         sorted(n for n in listed if n in ALL) == sorted(ALL),
         f"list shows {ALL}, got {listed}",
     )
+    arch_entry = next(vm for vm in doc["vms"] if vm["name"] == ARCH_NAME)
+    check(
+        arch_entry["ssh_user"] == "arch",
+        f"list reports per-VM user arch for {ARCH_NAME}, "
+        f"got {arch_entry['ssh_user']}",
+    )
 
     # 3. SSH hello world into each VM (one-shot ssh disconnects on its own).
     # For the Arch VM this proves the injected ed25519 key is accepted and
-    # the `arch` user (wheel group) works.
+    # the `arch` user (wheel group) works — via the per-VM ssh_command that
+    # list reads back from the domain metadata recorded at create.
     for vm in doc["vms"]:
         if vm["name"] not in ALL:
             continue
         world = f"hello-{vm['name']}"
-        ssh_command = create_cmds[vm["name"]]
-        ssh_hello(world, ssh_command)
-        check(True, f"hello world ran in {vm['name']} via {ssh_command}")
+        ssh_hello(world, vm["ssh_command"])
+        check(True, f"hello world ran in {vm['name']} via {vm['ssh_command']}")
 
     # 3b. `ssh <name>` opens a real session in the VM — stdin is /dev/null,
     # so the remote shell sees EOF and exits 0; a non-zero exit fails the run.
-    # `ssh` has no per-VM user metadata, so the Arch VM needs --user arch.
+    # The per-VM user (ubuntu/arch) comes from the domain metadata, no --user.
     for name in ALL:
-        args = ("--user", "arch") if name == ARCH_NAME else ()
-        doc = virt_runner("ssh", name, *args)
+        doc = virt_runner("ssh", name)
         check(doc["status"] == "success", f"ssh session into {name} closed cleanly")
         check(doc["exit_code"] == 0, f"ssh session into {name} exited 0")
 

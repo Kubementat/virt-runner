@@ -69,10 +69,11 @@ def _text_block(vm: VmInfo, display_user: str, identity: str) -> list[str]:
 @command(name="list")
 @click.option(
     "--user",
-    default=Virtualizer.DEFAULT_USER,
-    help="User name shown in the SSH command [default: ubuntu]",
+    default=None,
+    help="User name shown in the SSH command (overrides the per-VM user "
+    "recorded at create; default: per-VM, else ubuntu)",
 )
-def cmd_list(user: str, as_json: bool) -> None:
+def cmd_list(user: str | None, as_json: bool) -> None:
     """List VMs configured by vm-create (disk in the vm-pool)."""
     output.set_json_mode(as_json)
     v = Virtualizer()
@@ -96,6 +97,10 @@ def cmd_list(user: str, as_json: bool) -> None:
     except RuntimeError as exc:
         output.fail_with("list", exc, "pool-not-found")
 
+    def display_user(vm: VmInfo) -> str:
+        # Per-VM user recorded at create (domain metadata); explicit --user wins.
+        return user or v.domain_user(vm.name) or Virtualizer.DEFAULT_USER
+
     if as_json:
         # An empty listing is a success; the text-mode hint line is simply
         # not printed (the document carries count: 0).
@@ -103,9 +108,9 @@ def cmd_list(user: str, as_json: bool) -> None:
             "list",
             {
                 "pool": v.POOL,
-                "display_user": user,
+                "user_override": user,
                 "count": len(vms),
-                "vms": [_vm_document(vm, user, identity) for vm in vms],
+                "vms": [_vm_document(vm, display_user(vm), identity) for vm in vms],
             },
         )
         return
@@ -117,5 +122,5 @@ def cmd_list(user: str, as_json: bool) -> None:
         return
 
     for vm in vms:
-        for line in _text_block(vm, user, identity):
+        for line in _text_block(vm, display_user(vm), identity):
             click.echo(line)

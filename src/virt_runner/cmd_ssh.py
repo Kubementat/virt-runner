@@ -15,10 +15,11 @@ from virt_runner.virtualizer import Virtualizer
 @click.argument("name")
 @click.option(
     "--user",
-    default=Virtualizer.DEFAULT_USER,
-    help="User name to log in as [default: ubuntu]",
+    default=None,
+    help="User name to log in as "
+    "[default: user recorded at create, else ubuntu]",
 )
-def cmd_ssh(name: str, user: str, as_json: bool) -> None:
+def cmd_ssh(name: str, user: str | None, as_json: bool) -> None:
     """Open an interactive SSH shell on VM <NAME>."""
     output.set_json_mode(as_json)
     v = Virtualizer()
@@ -57,6 +58,8 @@ def cmd_ssh(name: str, user: str, as_json: bool) -> None:
                 code="no-ip",
                 fields={"name": name},
             )
+        # Per-VM user recorded at create (domain metadata); explicit --user wins.
+        user = user or v.domain_user(name) or Virtualizer.DEFAULT_USER
     except RuntimeError as exc:
         output.fail_with("ssh", exc, "libvirt-unreachable", fields={"name": name})
 

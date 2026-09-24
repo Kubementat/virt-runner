@@ -45,7 +45,7 @@ uv run virt-runner create NAME   # build + boot; --distro (ubuntu|arch),
 uv run virt-runner destroy NAME  # undefine + delete disk (idempotent)
 uv run virt-runner list          # only VMs whose disk lives in vm-pool
 uv run virt-runner ssh NAME      # interactive shell (resolves IP, uses the injected key;
-                                 # --user to log in as someone else)
+                                 # picks up the user recorded at create, --user to override)
 ```
 
 All four accept `--json`: stdout carries **exactly one** JSON document (success *or* error
@@ -98,6 +98,6 @@ spec), [`docs/e2e-acceptance.md`](docs/e2e-acceptance.md).
 |---|---|
 | `libvirt not reachable` | Not in `libvirt`/`kvm` groups in this shell → re-login; `./install-prerequisites.sh --check` |
 | `pool 'vm-pool' is not active` / `network 'default' is not active` | `virsh pool-start vm-pool && virsh net-start default` |
-| `no DHCP lease after 120s` / `SSH … not reachable yet` | `virsh console NAME` (Ctrl-`]` to detach) to watch the guest; for SSH make sure you use the key the VM was given: `ssh -i ~/.ssh/virt_runner_key ubuntu@IP` (user is `arch` for Arch VMs — `create` reports it) |
+| `no DHCP lease after 120s` / `SSH … not reachable yet` | `virsh console NAME` (Ctrl-`]` to detach) to watch the guest; for SSH make sure you use the key the VM was given: `ssh -i ~/.ssh/virt_runner_key ubuntu@IP` (`virt-runner ssh NAME` picks up the right user automatically; for Arch that is `arch`) |
 | `SHA256 mismatch` | Corrupt cache: delete `~/vm-images/<release>/` and retry |
 | disk survives `destroy` | `virsh vol-delete NAME_vda.qcow2 vm-pool` |

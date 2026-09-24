@@ -311,6 +311,15 @@ def cmd_create(
         created=True, domain_state=domain_state, uuid=v.get_domain_uuid(name)
     )
 
+    # Record the per-VM user so `ssh`/`list` log in as the created user.
+    try:
+        v.set_domain_metadata(name, distro, effective_user)
+    except RuntimeError:
+        output.warn(
+            f"could not record per-VM user metadata — `ssh`/`list` will "
+            f"fall back to user '{Virtualizer.DEFAULT_USER}' for {name}"
+        )
+
     # --no-boot: print not-booted variant.
     if no_boot:
         if as_json:
