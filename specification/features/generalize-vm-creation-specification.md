@@ -261,9 +261,14 @@ not a broken image):
 
 - `rhel` — cloud images require subscription/registration access
   (see §8 follow-up; do not ship a half-working profile).
-- `alpine`, `arch` — default images do not ship cloud-init/NoCloud;
+- `alpine` — default images do not ship cloud-init/NoCloud;
   out of the feature's design (would need initramfs/first-boot-script
   injection, a different mechanism).
+
+  ~~`arch`~~ — superseded: arch-boxes now ships an official cloud-init
+  cloud image (`https://fastly.mirror.pkgbuild.com/images/latest/Arch-Linux-x86_64-cloudimg.qcow2`,
+  sidecar `.SHA256`); `arch` is implemented as a profile (Option A in
+  `.agent-work/research.md`), x86_64-only, release `latest` only.
 
 The list and its reasons live in `config/distro-profiles.sh` as an
 `excluded_distros` map (`get_excluded_distros` prints `name<TAB>reason`);
@@ -973,9 +978,11 @@ at most once per ticket.
 - **G10 — Wait windows become options** (`--wait-lease` 120,
   `--wait-ssh` 90), defaults identical to today, so no distro gets a
   hidden behavior change.
-- **G11 — RHEL/Alpine/Arch are excluded by design**, with explicit
+- **G11 — RHEL/Alpine are excluded by design**, with explicit
   not-supported errors (exclusion list + reasons in §2.4,
   `excluded_distros` map; §4.1 item 1), not half-supported profiles.
+  Arch implemented via the official cloud image (see the supersession
+  note in §2.4).
 - **G12 — vm-list gets no per-VM distro knowledge in v1.** The
   limitation is documented; the sidecar-metadata follow-up is listed in
   §8. vm-destroy is untouched (already distro-agnostic).

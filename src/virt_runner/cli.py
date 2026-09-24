@@ -24,7 +24,7 @@ from virt_runner.cmd_ssh import cmd_ssh
 
 @click.group()
 def main():
-    """virt-runner — one-command Ubuntu KVM VM creation via libvirt + cloud-init."""
+    """virt-runner — one-command KVM VM creation (Ubuntu, Arch) via libvirt + cloud-init."""
 
 
 main.add_command(cmd_create, "create")

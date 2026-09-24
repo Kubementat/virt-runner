@@ -2,8 +2,8 @@
 
 Run with: uv run tests/integration_test.py
 
-Flow: create 2 VMs -> list (expect 2) -> ssh hello world in each ->
-ssh <name> session in each -> destroy both -> list (expect 0).
+Flow: create 2 Ubuntu VMs + 1 Arch VM -> list -> ssh hello world in each
+-> ssh <name> session in each -> destroy all -> list (expect 0).
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ import subprocess
 import sys
 
 NAMES = ["it-vm-a", "it-vm-b"]
+ARCH_NAME = "it-vm-arch"
+ALL = NAMES + [ARCH_NAME]
 
 
 def virt_runner(*args: str, allow_fail: bool = False) -> dict:
@@ -69,45 +71,78 @@ def main() -> None:
     # Best-effort cleanup of leftovers from a previous interrupted run.
     # Still --json: even the "vm-not-defined" error path must carry an
     # envelope on stdout.
-    for name in NAMES:
+    for name in ALL:
         virt_runner("destroy", name, allow_fail=True)
 
-    # 1. Create two VMs.
+    # 1. Create two VMs. The create document's ssh_command is kept: `list`
+    # has no per-VM user metadata (spec §4.6), so its ssh_command always
+    # carries `list`'s default user and is wrong for non-default users.
+    create_cmds: dict[str, str] = {}
     for name in NAMES:
         doc = virt_runner("create", "--ram", "1", "--vcpu", "1", "--disk", "8", name)
         check(doc["status"] == "success", f"create {name} succeeded")
         check(doc["booted"], f"{name} booted")
         check(doc["vm"]["ip"] is not None, f"{name} has an IP")
+        create_cmds[name] = doc["vm"]["ssh_command"]
 
-    # 2. List -> our two VMs present (foreign VMs in the pool are none of
+    # 1b. Arch leg: distro profile, arch-boxes image + sidecar .SHA256,
+    # wheel-group user `arch`, `generic` osinfo boot.
+    doc = virt_runner(
+        "create",
+        "--distro",
+        "arch",
+        "--ram",
+        "1",
+        "--vcpu",
+        "1",
+        "--disk",
+        "8",
+        ARCH_NAME,
+    )
+    check(doc["status"] == "success", f"create {ARCH_NAME} succeeded")
+    check(doc["booted"], f"{ARCH_NAME} booted")
+    check(doc["vm"]["distro"] == "arch", f"create {ARCH_NAME} reports distro arch")
+    check(doc["vm"]["ssh_user"] == "arch", f"create {ARCH_NAME} uses user arch")
+    check(doc["vm"]["ip"] is not None, f"{ARCH_NAME} has an IP")
+    create_cmds[ARCH_NAME] = doc["vm"]["ssh_command"]
+
+    # 2. List -> our three VMs present (foreign VMs in the pool are none of
     # the suite's business).
     doc = virt_runner("list")
     listed = [vm["name"] for vm in doc["vms"]]
-    check(sorted(n for n in listed if n in NAMES) == NAMES, f"list shows {NAMES}, got {listed}")
+    check(
+        sorted(n for n in listed if n in ALL) == sorted(ALL),
+        f"list shows {ALL}, got {listed}",
+    )
 
     # 3. SSH hello world into each VM (one-shot ssh disconnects on its own).
+    # For the Arch VM this proves the injected ed25519 key is accepted and
+    # the `arch` user (wheel group) works.
     for vm in doc["vms"]:
-        if vm["name"] not in NAMES:
+        if vm["name"] not in ALL:
             continue
         world = f"hello-{vm['name']}"
-        ssh_hello(world, vm["ssh_command"])
-        check(True, f"hello world ran in {vm['name']} via {vm['ssh_command']}")
+        ssh_command = create_cmds[vm["name"]]
+        ssh_hello(world, ssh_command)
+        check(True, f"hello world ran in {vm['name']} via {ssh_command}")
 
     # 3b. `ssh <name>` opens a real session in the VM — stdin is /dev/null,
     # so the remote shell sees EOF and exits 0; a non-zero exit fails the run.
-    for name in NAMES:
-        doc = virt_runner("ssh", name)
+    # `ssh` has no per-VM user metadata, so the Arch VM needs --user arch.
+    for name in ALL:
+        args = ("--user", "arch") if name == ARCH_NAME else ()
+        doc = virt_runner("ssh", name, *args)
         check(doc["status"] == "success", f"ssh session into {name} closed cleanly")
         check(doc["exit_code"] == 0, f"ssh session into {name} exited 0")
 
-    # 4. Destroy both.
-    for name in NAMES:
+    # 4. Destroy all.
+    for name in ALL:
         doc = virt_runner("destroy", name)
         check(doc["status"] == "success", f"destroy {name} succeeded")
 
     # 5. List -> none of our VMs left.
     doc = virt_runner("list")
-    left = [vm["name"] for vm in doc["vms"] if vm["name"] in NAMES]
+    left = [vm["name"] for vm in doc["vms"] if vm["name"] in ALL]
     check(not left, f"no test VMs left after teardown, got {left}")
 
 

@@ -17,10 +17,8 @@ import click
 
 from virt_runner import output
 from virt_runner.args import command
+from virt_runner.profiles import PROFILES
 from virt_runner.virtualizer import ImageFetch, Virtualizer
-
-#: The only profile implemented so far (distro profiles are a later ticket).
-DISTRO = "ubuntu"
 
 
 def _validate_name(ctx, param, value):
@@ -85,6 +83,12 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
 @command(name="create")
 @click.argument("name", callback=_validate_name)
 @click.option(
+    "--distro",
+    type=click.Choice(sorted(PROFILES)),
+    default="ubuntu",
+    help="Guest distro profile [default: ubuntu]",
+)
+@click.option(
     "--ram",
     default=4,
     type=click.IntRange(min=1),
@@ -105,8 +109,8 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
 @click.option(
     "--release",
     default=None,
-    help="Release codename (resolute, noble, …) "
-    f"[default: {Virtualizer.DEFAULT_RELEASE}]",
+    help="Release (Ubuntu codename, e.g. resolute; "
+    "Arch: 'latest') [default: per-distro]",
 )
 @click.option(
     "--image",
@@ -115,8 +119,8 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
 )
 @click.option(
     "--user",
-    default=Virtualizer.DEFAULT_USER,
-    help="Cloud user name [default: ubuntu]",
+    default=None,
+    help="Cloud user name [default: per-distro: ubuntu/arch]",
 )
 @click.option(
     "--ssh-key",
@@ -141,42 +145,47 @@ def cmd_create(
     ram: int,
     vcpu: int,
     disk: int,
+    distro: str,
     release: str,
     image: str | None,
-    user: str,
+    user: str | None,
     ssh_key: str,
     no_boot: bool,
     keep_going: bool,
     as_json: bool,
 ) -> None:
-    """Create and boot an Ubuntu KVM VM via libvirt (qemu:///system)."""
+    """Create and boot a KVM VM (Ubuntu or Arch) via libvirt (qemu:///system)."""
     output.set_json_mode(as_json)
     v = Virtualizer()
+    profile = PROFILES[distro]
 
     # --release/--image precedence (D1): an explicit --release wins over
     # --image regardless of order, even when its value equals the default.
     release_given = release is not None
     image_given = image is not None
-    effective_release = release if release_given else Virtualizer.DEFAULT_RELEASE
+    effective_release = release if release_given else profile.default_release
+    if profile.releases is not None and effective_release not in profile.releases:
+        raise click.UsageError(
+            f"{distro}: only release '{profile.releases[0]}' is supported; "
+            "for other builds pass the direct URL via --image"
+        )
 
     if release_given or not image_given:
-        image_url = (
-            f"{v.DEFAULT_IMAGE_BASE}/{effective_release}/current/"
-            f"{effective_release}-server-cloudimg-amd64.img"
-        )
+        image_url = profile.image_url(effective_release)
     else:
         image_url = image
 
     # Everything the result document may need, filled in as stages complete.
+    effective_user = user if user is not None else profile.suggested_user
     run_state: dict[str, Any] = {
         "name": name,
-        "distro": DISTRO,
+        "distro": distro,
         "release": effective_release,
         "arch": v.host_arch(),
         "ram_gib": ram,
         "vcpu": vcpu,
         "disk_gib": disk,
-        "user": user,
+        "user": effective_user,
         "ssh_identity": v.private_key_path(ssh_key),
         "image_url": image_url,
         "booted": False,
@@ -207,6 +216,7 @@ def cmd_create(
     # --------------------------------------------------------------
     try:
         image_fetch = v.fetch_and_verify_image(
+            profile=profile,
             release=effective_release,
             release_given=release_given,
             image_url=image_url,
@@ -223,7 +233,8 @@ def cmd_create(
     try:
         _, user_data, meta_data = v.generate_cloud_init_files(
             name=name,
-            user_name=user,
+            user_name=effective_user,
+            sudo_group=profile.sudo_group,
             ssh_key=ssh_key,
         )
     except RuntimeError as exc:
@@ -284,6 +295,7 @@ def cmd_create(
             cloud_init_user_data=user_data,
             cloud_init_meta_data=meta_data,
             ssh_key=ssh_key,
+            os_variant=profile.os_variant,
             no_boot=no_boot,
         )
     except RuntimeError as exc:
@@ -305,7 +317,7 @@ def cmd_create(
             output.emit("create", _create_document(run_state))
             return
         click.echo(f"VM created (not booted): {name}")
-        click.echo(f"Distro:  {DISTRO} {effective_release}")
+        click.echo(f"Distro:  {distro} {effective_release}")
         click.echo(f"Console: virsh console {name}     (Ctrl-] to detach)")
         click.echo(
             f"Teardown: virt-runner destroy {name}   "
@@ -338,7 +350,9 @@ def cmd_create(
     output.progress(f"IP acquired: {ip}")
 
     try:
-        v.verify_ssh_reachable(name, user, ip, identity=run_state["ssh_identity"])
+        v.verify_ssh_reachable(
+            name, effective_user, ip, identity=run_state["ssh_identity"]
+        )
     except RuntimeError as exc:
         output.fail_with(
             "create",
@@ -357,9 +371,9 @@ def cmd_create(
 
     click.echo("VM created and running.")
     click.echo(f"Name:    {name}   (UUID {run_state['uuid']})")
-    click.echo(f"Distro:  {DISTRO} {effective_release}")
+    click.echo(f"Distro:  {distro} {effective_release}")
     click.echo(f"IP:      {ip}   (also reachable as {name}.default)")
-    click.echo(f"SSH:     ssh {user}@{ip}")
+    click.echo(f"SSH:     ssh {effective_user}@{ip}")
     click.echo(f"Console: virsh console {name}     (Ctrl-] to detach)")
     click.echo(
         f"Teardown: virt-runner destroy {name}   "

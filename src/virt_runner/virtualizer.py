@@ -36,6 +36,7 @@ from typing import Any
 
 from virt_runner import output
 from virt_runner.errors import VirtError
+from virt_runner.profiles import DistroProfile
 
 # ---------------------------------------------------------------------------
 # Subprocess helpers
@@ -228,8 +229,6 @@ class Virtualizer:
 
     POOL = "vm-pool"
     NET = "default"
-    DEFAULT_IMAGE_BASE = "https://cloud-images.ubuntu.com"
-    DEFAULT_RELEASE = "resolute"
     DEFAULT_USER = "ubuntu"
     DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/virt_runner_key.pub")
     DEFAULT_LEASE_FILE = "/var/lib/libvirt/dnsmasq/virbr0.status"
@@ -414,6 +413,7 @@ class Virtualizer:
 
     def fetch_and_verify_image(
         self,
+        profile: DistroProfile,
         release: str,
         release_given: bool,
         image_url: str,
@@ -423,6 +423,7 @@ class Virtualizer:
         """Download + verify cloud image.
 
         Args:
+            profile: the distro profile (image URL, sums kind, cache dir).
             release: release codename (e.g. ``resolute``).
             release_given: whether ``--release`` was explicitly passed.
             image_url: the effective image URL (the release pattern unless
@@ -446,10 +447,18 @@ class Virtualizer:
         # Determine image path and verification settings.
         if release_given or not image_given:
             # Standard release path.
-            img_basename = f"{release}-server-cloudimg-amd64.img"
-            sums_url = f"{self.DEFAULT_IMAGE_BASE}/{release}/current/SHA256SUMS"
+            img_url = profile.image_url(release)
+            img_basename = img_url.rsplit("/", 1)[-1]
+            sums_url = (
+                img_url.rsplit("/", 1)[0] + "/SHA256SUMS"
+                if profile.sums_kind == "dir"
+                else img_url + ".SHA256"
+            )
             verifiable = True
-            cache_dir = cache_dir / release
+            if profile.cache_prefix:
+                cache_dir = cache_dir / profile.cache_prefix / release
+            else:
+                cache_dir = cache_dir / release
         else:
             # Bare --image path.
             img_basename = image_url.rsplit("/", 1)[-1]
@@ -630,6 +639,7 @@ class Virtualizer:
         self,
         name: str,
         user_name: str,
+        sudo_group: str,
         ssh_key: str,
     ) -> tuple[str, str, str]:
         """Generate cloud-init user-data and meta-data files.
@@ -667,7 +677,7 @@ class Virtualizer:
             "manage_etc_hosts: true\n"
             "users:\n"
             f"  - name: {user_name}\n"
-            "    groups: [sudo]\n"
+            f"    groups: [{sudo_group}]\n"
             '    sudo: ["ALL=(ALL) NOPASSWD:ALL"]\n'
             "    ssh_authorized_keys:\n"
             f"      - {ssh_key_line}\n"
@@ -796,6 +806,7 @@ class Virtualizer:
         cloud_init_user_data: str,
         cloud_init_meta_data: str,
         ssh_key: str,
+        os_variant: str,
         no_boot: bool,
     ) -> str:
         """Create a VM via virt-install.
@@ -822,7 +833,7 @@ class Virtualizer:
             "--network",
             f"network={self.NET},model=virtio,mac={mac}",
             "--os-variant",
-            "ubuntu-lts-latest",
+            os_variant,
             "--import",
             "--console",
             "none",

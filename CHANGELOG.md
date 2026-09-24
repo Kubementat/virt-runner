@@ -5,6 +5,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
+## [Unreleased]
+
+### Added
+
+- **Arch Linux guests** — `virt-runner create NAME --distro arch` boots the
+  official arch-boxes cloud image (`cloud-init`/NoCloud preinstalled,
+  x86_64-only, release `latest`) through the existing pipeline: sidecar
+  `.SHA256` verification, `wheel`-group user `arch`, `generic` osinfo.
+  Distro data now lives in `src/virt_runner/profiles.py` (data-driven
+  profiles per the generalization spec); `--user` and `--release` defaults
+  are now per-distro.
+
 ## [0.1.0] - 2026-08-25
 
 ### Added

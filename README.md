@@ -20,6 +20,9 @@ No libvirt bindings, no prompts, no sudo at run time.
 # 1. Create a VM (~2 min cold, ~20 s on a warm image cache)
 uv run virt-runner create myvm
 
+#    ...or an Arch Linux guest (official arch-boxes cloud image, user `arch`)
+uv run virt-runner create myvm --distro arch
+
 # 2. SSH in
 uv run virt-runner ssh myvm
 
@@ -35,8 +38,9 @@ reports any missing piece with an explicit error.
 ## Commands
 
 ```bash
-uv run virt-runner create NAME   # build + boot; --ram/--vcpu GiB/ count, --disk GiB,
-                                 # --release (default resolute), --image URL, --user,
+uv run virt-runner create NAME   # build + boot; --distro (ubuntu|arch),
+                                 # --ram/--vcpu GiB/ count, --disk GiB,
+                                 # --release (default per-distro), --image URL, --user,
                                  # --ssh-key, --no-boot, --keep-going
 uv run virt-runner destroy NAME  # undefine + delete disk (idempotent)
 uv run virt-runner list          # only VMs whose disk lives in vm-pool
@@ -54,16 +58,18 @@ uv run virt-runner create myvm --json | jq -r .vm.ssh_command
 
 ## Integration test
 
-`tests/integration_test.py` is an end-to-end suite against the real host: creates two VMs,
-lists them, runs a hello world via SSH in each (using the reported `ssh_command`), opens a
-`ssh <name>` session into each, destroys both, and verifies they're gone. Every call goes through `--json`, so it also enforces that
+`tests/integration_test.py` is an end-to-end suite against the real host: creates
+three VMs (two Ubuntu, one Arch), lists them, runs a hello world via SSH in each (using
+the reported `ssh_command`), opens a `ssh <name>` session into each, destroys them all,
+and verifies they're gone. Every call goes through `--json`, so it also enforces that
 stdout stays valid JSON at every step.
 
 ```bash
 uv run tests/integration_test.py
 ```
 
-It creates and destroys real VMs (`it-vm-a`, `it-vm-b`) and takes a few minutes. It cleans
+It creates and destroys real VMs (`it-vm-a`, `it-vm-b`, `it-vm-arch`) and takes a few
+minutes. It cleans
 up its own leftovers before starting and ignores VMs it doesn't own.
 
 ## Development
@@ -92,6 +98,6 @@ spec), [`docs/e2e-acceptance.md`](docs/e2e-acceptance.md).
 |---|---|
 | `libvirt not reachable` | Not in `libvirt`/`kvm` groups in this shell → re-login; `./install-prerequisites.sh --check` |
 | `pool 'vm-pool' is not active` / `network 'default' is not active` | `virsh pool-start vm-pool && virsh net-start default` |
-| `no DHCP lease after 120s` / `SSH … not reachable yet` | `virsh console NAME` (Ctrl-`]` to detach) to watch the guest; for SSH make sure you use the key the VM was given: `ssh -i ~/.ssh/virt_runner_key ubuntu@IP` |
+| `no DHCP lease after 120s` / `SSH … not reachable yet` | `virsh console NAME` (Ctrl-`]` to detach) to watch the guest; for SSH make sure you use the key the VM was given: `ssh -i ~/.ssh/virt_runner_key ubuntu@IP` (user is `arch` for Arch VMs — `create` reports it) |
 | `SHA256 mismatch` | Corrupt cache: delete `~/vm-images/<release>/` and retry |
 | disk survives `destroy` | `virsh vol-delete NAME_vda.qcow2 vm-pool` |
