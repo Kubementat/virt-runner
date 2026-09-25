@@ -51,6 +51,9 @@ uv run virt-runner ssh NAME      # interactive shell (resolves IP, uses the inje
                                  # picks up the user recorded at create, --user to override)
 ```
 
+Cached `latest`/`current` images are never refreshed — delete
+`~/vm-images/<distro>/<release>/` to pick up a newer build.
+
 All four accept `--json`: stdout carries **exactly one** JSON document (success *or* error
 envelope), everything else goes to stderr. `VM_JSON_TRACE=1` re-sends progress lines to
 stderr for debugging. Envelope and error codes: [JSON output](#json-output).
@@ -132,6 +135,7 @@ up its own leftovers before starting and ignores VMs it doesn't own.
 uv sync                 # create .venv (dev group adds ruff)
 uv run ruff check .     # lint
 uv run ruff format .    # format (line length 88, target py310)
+uv run tests/unit_test.py    # pure-logic checks (seconds, no KVM)
 ```
 
 Layout: `cli → cmd_* → virtualizer → core (output, errors)`. Only
