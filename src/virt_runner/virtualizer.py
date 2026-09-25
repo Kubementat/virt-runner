@@ -869,6 +869,24 @@ class Virtualizer:
         """Best-effort volume delete used by failure cleanup (PI-12)."""
         _quiet(["virsh", "--quiet", "vol-delete", volume, self.POOL])
 
+    def provision_volume(self, name: str, disk_gib: int, image_path: str) -> str:
+        """Create the pool volume, upload *image_path* into it, restore capacity.
+
+        A failed upload/resize leaves no volume behind (PI-12).
+
+        Raises:
+            VirtError: ``volume-create-failed``, ``volume-import-failed`` or
+                ``volume-resize-failed`` (the code each step already raises).
+        """
+        volume = self.create_volume(name, disk_gib)
+        try:
+            self.upload_image(volume, image_path)
+            self.resize_volume(volume, disk_gib)
+        except RuntimeError:
+            self.delete_volume_quiet(volume)
+            raise
+        return volume
+
     # ------------------------------------------------------------------
     # VM lifecycle
     # ------------------------------------------------------------------

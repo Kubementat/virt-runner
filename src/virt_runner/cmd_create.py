@@ -20,6 +20,15 @@ from virt_runner.args import command
 from virt_runner.profiles import PROFILES
 from virt_runner.virtualizer import ImageFetch, Virtualizer
 
+_DEFAULT_CODE = {
+    "preflight": "libvirt-unreachable",
+    "image": "image-download-failed",
+    "cloud-init": "cloud-init-failed",
+    "create": "vm-create-failed",
+    "wait-ip": "lease-timeout",
+    "ssh-verify": "ssh-timeout",
+}
+
 
 def _validate_name(ctx, param, value):
     """Validate VM name matches ^[A-Za-z][A-Za-z0-9._-]*$."""
@@ -41,6 +50,19 @@ def _validate_user(ctx, param, value):
             r"[a-z_][a-z0-9_-]{0,31}"
         )
     return value
+
+
+def _record_metadata(
+    v: Virtualizer, name: str, distro: str, user: str, identity: str
+) -> None:
+    """Record the per-VM user so `ssh`/`list` log in as the created user."""
+    try:
+        v.set_domain_metadata(name, distro, user, identity)
+    except RuntimeError:
+        output.warn(
+            f"could not record per-VM user metadata — `ssh`/`list` will "
+            f"fall back to user '{Virtualizer.DEFAULT_USER}' for {name}"
+        )
 
 
 def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
@@ -204,29 +226,18 @@ def cmd_create(
     }
 
     # --------------------------------------------------------------
-    # Step 1 — Preflight
+    # Pipeline — one try, one stage variable
     # --------------------------------------------------------------
+    stage = "preflight"
+    ip = None
     try:
         v.preflight_check()
-    except RuntimeError as exc:
-        output.fail_with("create", exc, "libvirt-unreachable", stage="preflight")
-
-    try:
         v.domain_not_defined(name)
-    except RuntimeError as exc:
-        output.fail_with("create", exc, "vm-already-defined", stage="preflight")
-
-    try:
         # Generated on first use when absent, so no manual key setup is needed.
         v.ensure_ssh_key(ssh_key)
-    except RuntimeError as exc:
-        output.fail_with("create", exc, "ssh-key-missing", stage="preflight")
 
-    # --------------------------------------------------------------
-    # Step 2 — Image download + verify
-    # --------------------------------------------------------------
-    try:
-        image_fetch = v.fetch_and_verify_image(
+        stage = "image"
+        image_fetch: ImageFetch = v.fetch_and_verify_image(
             profile=profile,
             release=effective_release,
             release_given=release_given,
@@ -234,72 +245,22 @@ def cmd_create(
             image_given=image_given,
             keep_going=keep_going,
         )
-    except RuntimeError as exc:
-        output.fail_with("create", exc, "image-download-failed", stage="image")
-    run_state["image"] = image_fetch
+        run_state["image"] = image_fetch
 
-    # --------------------------------------------------------------
-    # Step 3 — Cloud-init
-    # --------------------------------------------------------------
-    try:
+        stage = "cloud-init"
         user_data, meta_data = v.generate_cloud_init_files(
             name=name,
             user_name=effective_user,
             sudo_group=profile.sudo_group,
             ssh_key=ssh_key,
         )
-    except RuntimeError as exc:
-        output.fail_with("create", exc, "cloud-init-failed", stage="cloud-init")
 
-    # --------------------------------------------------------------
-    # Step 4 — VM creation (volume + domain; spec stage "create")
-    # --------------------------------------------------------------
-    try:
-        volume = v.create_volume(name, disk)
-    except RuntimeError as exc:
-        output.fail_with(
-            "create",
-            exc,
-            "volume-create-failed",
-            stage="create",
-            fields=_create_document(run_state),
-        )
-
-    try:
-        v.upload_image(volume, image_fetch.path)
-    except RuntimeError as exc:
-        # Clean up orphan volume.
-        v.delete_volume_quiet(volume)
-        output.fail_with(
-            "create",
-            exc,
-            "volume-import-failed",
-            stage="create",
-            fields=_create_document(run_state),
-        )
-
-    try:
-        v.resize_volume(volume, disk)
-    except RuntimeError as exc:
-        # No orphan volume behind: the domain does not exist yet.
-        v.delete_volume_quiet(volume)
-        output.fail_with(
-            "create",
-            exc,
-            "volume-resize-failed",
-            stage="create",
-            fields=_create_document(run_state),
-        )
-
-    mac = v.generate_mac()
-    run_state["mac"] = mac
-
-    ram_mib = ram * 1024
-
-    try:
+        stage = "create"
+        volume = v.provision_volume(name, disk, image_fetch.path)
+        run_state["mac"] = mac = v.generate_mac()
         domain_state = v.create_vm(
             name=name,
-            ram_mib=ram_mib,
+            ram_mib=ram * 1024,
             vcpus=vcpu,
             volume=volume,
             mac=mac,
@@ -309,91 +270,51 @@ def cmd_create(
             os_variant=profile.os_variant,
             no_boot=no_boot,
         )
+        run_state.update(
+            created=True, domain_state=domain_state, uuid=v.get_domain_uuid(name)
+        )
+        _record_metadata(v, name, distro, effective_user, run_state["ssh_identity"])
+
+        if not no_boot:
+            stage = "wait-ip"
+            lease_file = os.environ.get(
+                "VM_CREATE_LEASE_FILE",
+                Virtualizer.DEFAULT_LEASE_FILE,
+            )
+            ip = v.wait_for_ip(name, mac, lease_file)
+            run_state["booted"] = True
+            run_state["ip"] = ip
+            output.progress(f"IP acquired: {ip}")
+
+            stage = "ssh-verify"
+            v.verify_ssh_reachable(
+                name, effective_user, ip, identity=run_state["ssh_identity"]
+            )
     except RuntimeError as exc:
         output.fail_with(
             "create",
             exc,
-            "vm-create-failed",
-            stage="create",
-            fields=_create_document(run_state),
-        )
-
-    run_state.update(
-        created=True, domain_state=domain_state, uuid=v.get_domain_uuid(name)
-    )
-
-    # Record the per-VM user so `ssh`/`list` log in as the created user.
-    try:
-        v.set_domain_metadata(name, distro, effective_user, run_state["ssh_identity"])
-    except RuntimeError:
-        output.warn(
-            f"could not record per-VM user metadata — `ssh`/`list` will "
-            f"fall back to user '{Virtualizer.DEFAULT_USER}' for {name}"
-        )
-
-    # --no-boot: print not-booted variant.
-    if no_boot:
-        if as_json:
-            output.emit("create", _create_document(run_state))
-            return
-        click.echo(f"VM created (not booted): {name}")
-        click.echo(f"Distro:  {distro} {effective_release}")
-        click.echo(f"Console: virsh console {name}     (Ctrl-] to detach)")
-        click.echo(
-            f"Teardown: virt-runner destroy {name}   "
-            f"(or: virsh destroy {name} && virsh undefine {name})"
-        )
-        return
-
-    # --------------------------------------------------------------
-    # Step 5 — IP discovery + SSH verification
-    # --------------------------------------------------------------
-    lease_file = os.environ.get(
-        "VM_CREATE_LEASE_FILE",
-        Virtualizer.DEFAULT_LEASE_FILE,
-    )
-
-    try:
-        ip = v.wait_for_ip(name, mac, lease_file)
-    except RuntimeError as exc:
-        output.fail_with(
-            "create",
-            exc,
-            "lease-timeout",
-            stage="wait-ip",
-            fields=_create_document(run_state),
-        )
-
-    run_state["booted"] = True
-    run_state["ip"] = ip
-
-    output.progress(f"IP acquired: {ip}")
-
-    try:
-        v.verify_ssh_reachable(
-            name, effective_user, ip, identity=run_state["ssh_identity"]
-        )
-    except RuntimeError as exc:
-        output.fail_with(
-            "create",
-            exc,
-            "ssh-timeout",
-            stage="ssh-verify",
+            _DEFAULT_CODE[stage],
+            stage=getattr(exc, "stage", None) or stage,
             fields=_create_document(run_state),
         )
 
     # --------------------------------------------------------------
-    # Step 6 — Access info
+    # Access info
     # --------------------------------------------------------------
     if as_json:
         output.emit("create", _create_document(run_state))
         return
 
-    click.echo("VM created and running.")
-    click.echo(f"Name:    {name}   (UUID {run_state['uuid']})")
-    click.echo(f"Distro:  {distro} {effective_release}")
-    click.echo(f"IP:      {ip}   (also reachable as {name}.default)")
-    click.echo(f"SSH:     virt-runner ssh {name}")
+    if no_boot:
+        click.echo(f"VM created (not booted): {name}")
+        click.echo(f"Distro:  {distro} {effective_release}")
+    else:
+        click.echo("VM created and running.")
+        click.echo(f"Name:    {name}   (UUID {run_state['uuid']})")
+        click.echo(f"Distro:  {distro} {effective_release}")
+        click.echo(f"IP:      {ip}   (also reachable as {name}.default)")
+        click.echo(f"SSH:     virt-runner ssh {name}")
     click.echo(f"Console: virsh console {name}     (Ctrl-] to detach)")
     click.echo(
         f"Teardown: virt-runner destroy {name}   "
