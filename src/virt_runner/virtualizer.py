@@ -495,7 +495,8 @@ class Virtualizer:
             # A cached file is a previously verified artifact (only a verified
             # download writes it), so the verification mode is reported rather
             # than re-run here (PI-14).
-            verification = "sha256-sums" if verifiable else "skipped"
+            marker = img_path.with_name(img_path.name + ".verified")
+            verification = "sha256-sums" if marker.exists() else "skipped"
             return ImageFetch(
                 path=str(img_path),
                 cache_hit=True,
@@ -561,6 +562,10 @@ class Virtualizer:
                 else:
                     # Compared successfully against its own sums entry.
                     verification = "sha256-sums"
+                    # Write a marker so cache hits can prove verification.
+                    img_path.with_name(img_path.name + ".verified").write_text(
+                        expected[0] + "\n"
+                    )
             else:
                 # D1: no derivable same-directory SHA256SUMS -> skip
                 # verification, warn.
@@ -573,7 +578,9 @@ class Virtualizer:
         # missed, so there is no previously cached image left to fall back on
         # (the file at this path is the partial/corrupt download we just made).
         if not img_ok:
+            marker = img_path.with_name(img_path.name + ".verified")
             img_path.unlink(missing_ok=True)
+            marker.unlink(missing_ok=True)
             if keep_going:
                 raise VirtError(
                     f"keep-going: {fail_msg}; no cached image to continue with",
