@@ -100,7 +100,7 @@ def cmd_list(user: str | None, as_json: bool) -> None:
         # An empty listing is a success; the text-mode hint line is simply
         # not printed (the document carries count: 0).
         def _vm_meta(vm: VmInfo) -> tuple[str, str]:
-            meta = v.domain_meta(vm.name)
+            meta = vm.meta
             display_user = user or meta.get("user") or Virtualizer.DEFAULT_USER
             identity = meta.get("identity") or Virtualizer.private_key_path(
                 Virtualizer.DEFAULT_SSH_KEY

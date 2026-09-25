@@ -32,7 +32,7 @@ import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -187,6 +187,7 @@ class VmInfo:
     mac: str
     ip: str
     ip_status: str
+    meta: dict[str, str] = field(default_factory=dict)
 
     @property
     def running(self) -> bool:
@@ -979,13 +980,18 @@ class Virtualizer:
 
         return "running"
 
+    def domain_xml(self, name: str) -> ET.Element | None:
+        """Parsed ``virsh dumpxml`` of *name*, or ``None`` when unavailable."""
+        text = _stdout(["virsh", "dumpxml", name])
+        try:
+            return ET.fromstring(text) if text.strip() else None
+        except ET.ParseError:
+            return None
+
     def get_domain_uuid(self, name: str) -> str:
         """Return the domain UUID (PI-6: last field of the ``UUID:`` line)."""
-        info = _stdout(["virsh", "dominfo", name])
-        for line in info.strip().splitlines():
-            if line.startswith("UUID"):
-                return line.split()[-1]
-        return ""
+        root = self.domain_xml(name)
+        return root.findtext("uuid", "") if root is not None else ""
 
     def get_domain_state(self, name: str) -> str:
         """Return the domain state string (``running``, ``shut off``, …)."""
@@ -1018,23 +1024,11 @@ class Virtualizer:
 
     def domain_meta(self, name: str) -> dict[str, str]:
         """Parse the ``virt-runner`` metadata block and return its attributes."""
-        try:
-            raw = _stdout(
-                [
-                    "virsh",
-                    "metadata",
-                    name,
-                    self.METADATA_URI,
-                    "--key",
-                    self.METADATA_KEY,
-                ]
-            )
-            if not raw.strip():
-                return {}
-            root = ET.fromstring(raw)
-            return dict(root.attrib)
-        except (ET.ParseError, RuntimeError):
+        root = self.domain_xml(name)
+        if root is None:
             return {}
+        meta = root.find(f"metadata/{{{self.METADATA_URI}}}{self.METADATA_KEY}")
+        return dict(meta.attrib) if meta is not None else {}
 
     # ------------------------------------------------------------------
     # IP discovery + SSH verification
@@ -1155,8 +1149,8 @@ class Virtualizer:
         table = _stdout(["arp", "-n"])
         for line in table.splitlines():
             fields = line.split()
-            for i, field in enumerate(fields):
-                if i > 0 and field.lower() == mac_lower:
+            for i, value in enumerate(fields):
+                if i > 0 and value.lower() == mac_lower:
                     return fields[i - 1]
         return None
 
@@ -1218,7 +1212,8 @@ class Virtualizer:
         ``/prefix`` suffix, so it is matched anywhere in the line and
         stripped).
         """
-        mac = self._first_mac(name)
+        root = self.domain_xml(name)
+        mac = self._mac_of(root) if root is not None else ""
         ip = self.find_ip_for_mac(lease_file, mac) if mac else None
         if ip:
             return ip
@@ -1271,6 +1266,23 @@ class Virtualizer:
             "pool-path-unknown",
         )
 
+    def _first_disk_in_pool(self, root: ET.Element, pool_path: str) -> bool:
+        """True if any of the domain's disk sources lives under *pool_path*.
+
+        Compared on path components: a bare prefix match would also accept a
+        sibling directory such as ``<pool_path>-evil``.
+        """
+        return any(
+            (s.get("file") or "").startswith(f"{pool_path}/")
+            for s in root.iterfind("devices/disk/source")
+        )
+
+    @staticmethod
+    def _mac_of(root: ET.Element) -> str:
+        """MAC of the domain's first interface, or ``""`` when absent."""
+        mac = root.find("devices/interface/mac")
+        return mac.get("address", "") if mac is not None else ""
+
     def list_vms(self, lease_file: str) -> list[VmInfo]:
         """Return one :class:`VmInfo` per domain whose disk lives in the pool.
 
@@ -1284,51 +1296,28 @@ class Virtualizer:
 
         results = []
         for name in domain_names:
-            if not self._has_pool_disk(name, pool_path):
+            root = self.domain_xml(name)
+            if root is None or not self._first_disk_in_pool(root, pool_path):
                 continue
 
             state = self.get_domain_state(name)
-            mac = self._first_mac(name)
+            mac = self._mac_of(root)
             ip = (self.find_ip_for_mac(lease_file, mac) or "") if mac else ""
+            meta_el = root.find(f"metadata/{{{self.METADATA_URI}}}{self.METADATA_KEY}")
 
             results.append(
                 VmInfo(
                     name=name,
-                    uuid=self.get_domain_uuid(name),
+                    uuid=root.findtext("uuid", ""),
                     state=state,
                     mac=mac,
                     ip=ip,
                     ip_status=ip_status_for(state, mac, ip),
+                    meta=dict(meta_el.attrib) if meta_el is not None else {},
                 )
             )
 
         return results
-
-    @staticmethod
-    def _has_pool_disk(name: str, pool_path: str) -> bool:
-        """True if any of the domain's disk sources lives under *pool_path*.
-
-        Compared on path components: a bare prefix match would also accept a
-        sibling directory such as ``<pool_path>-evil``.
-        """
-        listing = _stdout(["virsh", "domblklist", name])
-        for line in listing.strip().splitlines()[2:]:  # skip header
-            parts = line.split()
-            if len(parts) >= 2 and parts[1].startswith(f"{pool_path}/"):
-                return True
-        return False
-
-    @staticmethod
-    def _first_mac(name: str) -> str:
-        """MAC of the domain's first interface, or ``""`` when unparseable."""
-        listing = _stdout(["virsh", "domiflist", name])
-        for line in listing.splitlines():
-            fields = line.split()
-            if len(fields) >= 5 and re.fullmatch(
-                r"[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}", fields[4]
-            ):
-                return fields[4]
-        return ""
 
     # ------------------------------------------------------------------
     # Destroy
