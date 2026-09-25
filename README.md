@@ -53,11 +53,62 @@ uv run virt-runner ssh NAME      # interactive shell (resolves IP, uses the inje
 
 All four accept `--json`: stdout carries **exactly one** JSON document (success *or* error
 envelope), everything else goes to stderr. `VM_JSON_TRACE=1` re-sends progress lines to
-stderr for debugging. Envelope schema: `specification/python-rewrite.md` §5.
+stderr for debugging. Envelope and error codes: [JSON output](#json-output).
 
 ```bash
 uv run virt-runner create myvm --json | jq -r .vm.ssh_command
 ```
+
+## JSON output
+
+``--json`` makes stdout carry **exactly one** JSON document, the result envelope:
+
+```json
+{"tool": "vm-create", "version": "…", "status": "success", "error": null, "vm": {…}, "image": {…}}
+{"tool": "vm-create", "version": "…", "status": "error", "error": {"code": "…", "message": "…"}}
+```
+
+- `tool` — the command: `vm-create`, `vm-destroy`, `vm-list`, `vm-ssh`.
+- `version` — installed package version.
+- `status` — `success` or `error`.
+- `error` — `null` on success, else `{code, message}` plus `stage` when the
+  failure belongs to a `create` stage (`preflight`, `image`, `cloud-init`,
+  `create`, `wait-ip`, `ssh-verify`).
+- The remaining top-level keys are the command's sections (`vm`, `image`,
+  `vms`, …) — the same state the text report prints.
+
+Exit codes never change with `--json`: `0` success, `1` runtime or preflight
+failure, `2` usage error.
+
+### Error codes
+
+| Code | Meaning |
+|---|---|
+| `usage` | Invalid command line (flag, VM name, or `--user` value) |
+| `runtime-error` | Uncaught failure without a more specific code |
+| `libvirt-unreachable` | `virsh` cannot talk to `libvirtd` |
+| `pool-not-active` | Storage pool `vm-pool` is not active |
+| `pool-not-found` | Storage pool `vm-pool` is not defined |
+| `pool-path-unknown` | The pool's directory path could not be determined |
+| `network-not-active` | The `default` network is not active |
+| `unsupported-arch` | Host is not x86_64 (images are x86_64 only) |
+| `vm-already-defined` | A domain with the given name already exists |
+| `vm-not-defined` | No such domain (destroy/ssh of a missing VM) |
+| `vm-not-running` | The domain exists but is not running |
+| `no-ip` | No DHCP lease/address found for the VM |
+| `ssh-key-missing` | No usable key at `--ssh-key` and none could be generated |
+| `image-download-failed` | The image (or its directory listing) could not be fetched |
+| `image-verification-failed` | SHA256 mismatch or missing checksum entry |
+| `image-no-cache` | `--keep-going` with a failed download/verify and no cached image |
+| `cloud-init-failed` | The cloud-init user/meta-data files could not be generated |
+| `volume-create-failed` | `virsh vol-create-as` failed |
+| `volume-import-failed` | `virsh vol-upload` failed |
+| `volume-resize-failed` | `virsh vol-resize` failed |
+| `vm-create-failed` | `virt-install` failed (domain and volume removed) |
+| `vm-destroy-failed` | `virsh destroy`/`undefine` failed during teardown |
+| `volume-delete-failed` | `virsh vol-delete` failed during teardown |
+| `lease-timeout` | No DHCP lease within the wait window |
+| `ssh-timeout` | The SSH round-trip never succeeded within the wait window |
 
 ## Integration test
 
@@ -86,14 +137,13 @@ uv run ruff format .    # format (line length 88, target py310)
 Layout: `cli → cmd_* → virtualizer → core (output, errors)`. Only
 [`src/virt_runner/virtualizer.py`](src/virt_runner/virtualizer.py) touches the host; text and
 JSON render from one run-state dict. Exit codes: `0` success, `1` runtime, `2` usage — with
-stable `error.code` values (full table: spec §5.2).
+stable `error.code` values (full table: [JSON output](#json-output)).
 
 Gotchas that bite when touching the create stage (full list: spec §13, `docs/lessons-learned/`):
 `vol-upload` implicitly resizes the volume (a `vol-resize` after it is mandatory), `--ram`
 is **MiB** in virt-install, and `disable=on` on `--cloud-init` is mandatory.
 
-Read next: [`specification/python-rewrite.md`](specification/python-rewrite.md) (the binding
-spec), [`docs/e2e-acceptance.md`](docs/e2e-acceptance.md).
+Read next: [`docs/e2e-acceptance.md`](docs/e2e-acceptance.md).
 
 ## Troubleshooting
 

@@ -4,8 +4,8 @@
 handlers keep working; the CLI layer reads ``.code``/``.stage`` to build the
 error envelope instead of string-matching messages.
 
-Codes are the stable set of ``specification/python-rewrite.md`` §5.2. Adding
-one means adding it to that table first.
+Codes are the stable set documented in the README's "JSON output" section
+(### Error codes). Adding one means adding it to that table first.
 """
 
 from __future__ import annotations

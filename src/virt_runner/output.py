@@ -1,6 +1,6 @@
 """Output rendering for the subcommands: human text (default) or ``--json``.
 
-Contract: ``specification/python-rewrite.md`` §5 (JSON Output Contract).
+Contract: the README's "JSON output" section (envelope, exit codes, error codes).
 
 ``--json`` makes stdout carry **exactly one** JSON document — the result
 envelope below — written at the end of the run, after success or failure has
