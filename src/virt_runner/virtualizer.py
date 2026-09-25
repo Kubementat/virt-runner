@@ -454,9 +454,6 @@ class Virtualizer:
         )
         cache_dir = Path(cache_root)
 
-        # Resolve any glob in the image URL (Fedora uses rotating filenames).
-        image_url = self._resolve_glob(image_url)
-
         # Determine image path and verification settings.
         if release_given or not image_given:
             # Standard release path (image_url is the profile's release URL).
@@ -474,6 +471,9 @@ class Virtualizer:
             scheme = image_url.split("://")[0] if "://" in image_url else ""
             verifiable = scheme in ("file", "http", "https")
             cache_dir = cache_dir / "custom"
+
+        # Resolve any glob in the image URL (Fedora uses rotating filenames).
+        image_url = _resolve_glob(image_url, cache_dir)
 
         img_path = cache_dir / img_basename
         sums_path = cache_dir / "SHA256SUMS"
@@ -630,28 +630,57 @@ class Virtualizer:
                 entries.append(((m["bn"] or m["n"]), (m["bh"] or m["h"]).lower()))
         return entries
 
-    @staticmethod
-    def _resolve_glob(url: str) -> str:
-        """Resolve a URL containing ``*`` by listing the directory.
 
-        Returns a concrete URL when *url* contains ``*``; otherwise returns
-        *url* unchanged.  The listing is fetched via ``curl -s -L`` and
-        ``.qcow2`` filenames matching the glob are extracted from the HTML.
-        """
-        if "*" not in url:
-            return url
-        # Fetch directory listing and extract matching .qcow2 filenames.
-        result = _spawn(["curl", "-s", "-L", url.rsplit("/", 1)[0] + "/"])
-        if result.returncode != 0:
-            return url  # fall through: download will fail with a clear error
-        # Extract .qcow2 filenames from the HTML listing.
-        filenames = re.findall(r'href="([^"]+\.qcow2)"', result.stdout)
-        # Filter to entries matching the glob pattern.
-        pattern = url.rsplit("/", 1)[-1]
-        for name in filenames:
-            if fnmatch.fnmatch(name, pattern):
-                return url.rsplit("/", 1)[0] + "/" + name
-        return url  # no match found; let the download fail with a clear error
+def _newest_match(names: list[str], pattern: str) -> str | None:
+    """Newest (natural-sort) name matching *pattern*: '44-1.10' > '44-1.7'."""
+
+    def _key(s: str) -> list[int | str]:
+        return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
+
+    hits = [n for n in set(names) if fnmatch.fnmatch(n, pattern)]
+    return max(hits, key=_key) if hits else None
+
+
+def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
+    """Resolve a URL containing ``*`` by listing the directory.
+
+    Returns a concrete URL when *url* contains ``*``; otherwise returns
+    *url* unchanged.  The listing is fetched via ``curl -s -L`` and
+    ``.qcow2`` filenames matching the glob are extracted from the HTML.
+    """
+    if "*" not in url:
+        return url
+    dir_url = url.rsplit("/", 1)[0] + "/"
+    pattern = url.rsplit("/", 1)[-1]
+    # Fetch directory listing and extract matching .qcow2 filenames.
+    result = _spawn(["curl", "-s", "-L", "-A", USER_AGENT, dir_url])
+    if result.returncode != 0:
+        # Offline: try the cache.
+        if cache_dir is not None:
+            base = url.rsplit("/", 1)[-1].rsplit("*", 1)[0]
+            candidate = _newest_match(os.listdir(cache_dir), base + "*.qcow2")
+            if candidate:
+                return dir_url + candidate
+        return url  # fall through: download will fail with a clear error
+    # Extract .qcow2 filenames from the HTML listing.
+    filenames = re.findall(r'href="([^"]+\.qcow2)"', result.stdout)
+    # Filter to entries matching the glob pattern.
+    for name in filenames:
+        if fnmatch.fnmatch(name, pattern):
+            return dir_url + name
+    # No match found and not offline — raise to avoid literal * in paths.
+    if cache_dir is None:
+        raise VirtError(
+            f"no image matching {pattern} at {dir_url}",
+            "image-download-failed",
+            "image",
+        )
+    candidate = _newest_match(os.listdir(cache_dir), pattern)
+    if candidate:
+        return dir_url + candidate
+    raise VirtError(
+        f"no image matching {pattern} at {dir_url}", "image-download-failed", "image"
+    )
 
     @staticmethod
     def _sha256_of(path: Path) -> str:

@@ -2,6 +2,7 @@
 
 from virt_runner import virtualizer as vz
 from virt_runner.profiles import PROFILES, _same_dir
+from virt_runner.virtualizer import _newest_match
 
 
 def main() -> None:
@@ -57,6 +58,17 @@ def main() -> None:
     # _sums_entries — junk lines ignored.
     entries = vz.Virtualizer._sums_entries("not a hash\n\nmore junk\n")
     assert entries == []
+
+    # _newest_match — 1.10 beats 1.7.
+    names = [
+        "Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2",
+        "Fedora-Cloud-Base-Generic-44-1.10.x86_64.qcow2",
+    ]
+    result = _newest_match(names, "Fedora-Cloud-Base-Generic-44-*.x86_64.qcow2")
+    assert result == "Fedora-Cloud-Base-Generic-44-1.10.x86_64.qcow2", result
+
+    # _newest_match — no match returns None.
+    assert _newest_match(["foo.txt"], "*.qcow2") is None
 
     print("unit checks ok")
 
