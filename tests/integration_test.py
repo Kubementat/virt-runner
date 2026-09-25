@@ -144,6 +144,11 @@ def main() -> None:
         sorted(n for n in listed if n in ALL) == sorted(ALL),
         f"list shows {ALL}, got {listed}",
     )
+    # Verify ssh_command for it-vm-a contains the default private key path.
+    vm_a = next(vm for vm in doc["vms"] if vm["name"] == "it-vm-a")
+    assert vm_a["ssh_command"] is not None
+    assert "-i " in vm_a["ssh_command"]
+
     arch_entry = next(vm for vm in doc["vms"] if vm["name"] == ARCH_NAME)
     check(
         arch_entry["ssh_user"] == "arch",

@@ -77,7 +77,6 @@ def cmd_list(user: str | None, as_json: bool) -> None:
     """List VMs created by virt-runner (disk in the vm-pool)."""
     output.set_json_mode(as_json)
     v = Virtualizer()
-    identity = Virtualizer.private_key_path(Virtualizer.DEFAULT_SSH_KEY)
 
     # Preflight, narrowed to what listing needs: libvirt reachable and the
     # pool *defined* (an inactive pool still has listable VMs). The network is
@@ -97,20 +96,24 @@ def cmd_list(user: str | None, as_json: bool) -> None:
     except RuntimeError as exc:
         output.fail_with("list", exc, "pool-not-found")
 
-    def display_user(vm: VmInfo) -> str:
-        # Per-VM user recorded at create (domain metadata); explicit --user wins.
-        return user or v.domain_user(vm.name) or Virtualizer.DEFAULT_USER
-
     if as_json:
         # An empty listing is a success; the text-mode hint line is simply
         # not printed (the document carries count: 0).
+        def _vm_meta(vm: VmInfo) -> tuple[str, str]:
+            meta = v.domain_meta(vm.name)
+            display_user = user or meta.get("user") or Virtualizer.DEFAULT_USER
+            identity = meta.get("identity") or Virtualizer.private_key_path(
+                Virtualizer.DEFAULT_SSH_KEY
+            )
+            return display_user, identity
+
         output.emit(
             "list",
             {
                 "pool": v.POOL,
                 "user_override": user,
                 "count": len(vms),
-                "vms": [_vm_document(vm, display_user(vm), identity) for vm in vms],
+                "vms": [_vm_document(vm, *(_vm_meta(vm))) for vm in vms],
             },
         )
         return

@@ -30,6 +30,7 @@ import tempfile
 import time
 import urllib.request
 import uuid
+import xml.etree.ElementTree as ET
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -946,13 +947,18 @@ def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
         """Return the domain state string (``running``, ``shut off``, …)."""
         return _stdout(["virsh", "domstate", name]).strip()
 
-    def set_domain_metadata(self, name: str, distro: str, user: str) -> None:
-        """Record the guest distro/user in the domain's metadata.
+    def set_domain_metadata(
+        self, name: str, distro: str, user: str, identity: str
+    ) -> None:
+        """Record the guest distro/user/identity in the domain's metadata.
 
-        Read back by ``ssh``/``list`` via :meth:`domain_user`, so both log in
+        Read back by ``ssh``/``list`` via :meth:`domain_meta`, so both log in
         as the user that was actually created on the guest.
         """
-        xml = f'<virt-runner distro="{distro}" user="{user}"/>'
+        xml = ET.tostring(
+            ET.Element("virt-runner", distro=distro, user=user, identity=identity),
+            encoding="unicode",
+        )
         _run(
             [
                 "virsh",
@@ -966,11 +972,10 @@ def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
             ]
         )
 
-    def domain_user(self, name: str) -> str | None:
-        """The ``user`` from the domain's ``virt-runner`` metadata, else ``None``."""
-        m = re.search(
-            r'user="([^"]+)"',
-            _stdout(
+    def domain_meta(self, name: str) -> dict[str, str]:
+        """Parse the ``virt-runner`` metadata block and return its attributes."""
+        try:
+            raw = _stdout(
                 [
                     "virsh",
                     "metadata",
@@ -979,9 +984,13 @@ def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
                     "--key",
                     self.METADATA_KEY,
                 ]
-            ),
-        )
-        return m.group(1) if m else None
+            )
+            if not raw.strip():
+                return {}
+            root = ET.fromstring(raw)
+            return dict(root.attrib)
+        except (ET.ParseError, RuntimeError):
+            return {}
 
     # ------------------------------------------------------------------
     # IP discovery + SSH verification

@@ -231,7 +231,7 @@ def cmd_create(
     # Step 3 — Cloud-init
     # --------------------------------------------------------------
     try:
-        _, user_data, meta_data = v.generate_cloud_init_files(
+        user_data, meta_data = v.generate_cloud_init_files(
             name=name,
             user_name=effective_user,
             sudo_group=profile.sudo_group,
@@ -313,7 +313,7 @@ def cmd_create(
 
     # Record the per-VM user so `ssh`/`list` log in as the created user.
     try:
-        v.set_domain_metadata(name, distro, effective_user)
+        v.set_domain_metadata(name, distro, effective_user, run_state["ssh_identity"])
     except RuntimeError:
         output.warn(
             f"could not record per-VM user metadata — `ssh`/`list` will "

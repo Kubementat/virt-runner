@@ -22,7 +22,6 @@ def cmd_ssh(name: str, user: str | None, as_json: bool) -> None:
     """Open an interactive SSH shell on VM <NAME>."""
     output.set_json_mode(as_json)
     v = Virtualizer()
-    identity = Virtualizer.private_key_path(Virtualizer.DEFAULT_SSH_KEY)
 
     try:
         v.libvirt_reachable()
@@ -57,8 +56,12 @@ def cmd_ssh(name: str, user: str | None, as_json: bool) -> None:
                 code="no-ip",
                 fields={"name": name},
             )
-        # Per-VM user recorded at create (domain metadata); explicit --user wins.
-        user = user or v.domain_user(name) or Virtualizer.DEFAULT_USER
+        # Per-VM user/identity recorded at create (domain metadata); explicit --user wins.
+        meta = v.domain_meta(name)
+        user = user or meta.get("user") or Virtualizer.DEFAULT_USER
+        identity = meta.get("identity") or Virtualizer.private_key_path(
+            Virtualizer.DEFAULT_SSH_KEY
+        )
     except RuntimeError as exc:
         output.fail_with("ssh", exc, "libvirt-unreachable", fields={"name": name})
 
