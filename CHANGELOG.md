@@ -7,6 +7,32 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Fedora checksum verification** — the CHECKSUM filename was derived from
+  the image basename instead of the compose name, causing a 404 and silent
+  skip of verification. Now resolved via the distro profile's ``sums_url``
+  callable.
+- **Cache-hit verification reporting** — previously always claimed
+  ``sha256-sums`` on cache hits regardless of whether a ``.verified`` marker
+  existed. Now reports ``skipped`` when the marker is absent (pre-0.4
+  caches will show ``skipped`` on first re-run).
+- **Custom-image cache collision** — bare ``--image`` URLs with the same
+  basename but different origins now cache under ``custom/<url-sha256-12>``
+  instead of ``custom/<basename>``. Old orphaned entries are harmless.
+- **``destroy`` error codes** — ``destroy`` now checks libvirt reachability
+  first (``libvirt-unreachable``) and wraps domain teardown failures with
+  the new ``vm-destroy-failed`` error code.
+- **Per-VM SSH identity metadata** — ``create`` now records the SSH private
+  key path in domain metadata; ``ssh`` and ``list`` read it back so the
+  ``ssh_command`` carries the correct ``-i`` flag.
+- **``--user`` validation** — invalid user names (not matching
+  ``[a-z_][a-z0-9_-]{0,31}``) are rejected with exit code 2 and code
+  ``usage``. Cloud-init scalars are now JSON-quoted to prevent ``#`` or
+  ``: `` in key comments from breaking the YAML.
+- **Non-x86_64 host refusal** — ``preflight_check`` now rejects hosts whose
+  ``uname -m`` is not ``x86_64`` with error code ``unsupported-arch``.
+
 ### Added
 
 - **Arch Linux guests** — `virt-runner create NAME --distro arch` boots the
