@@ -21,9 +21,9 @@
 # Supports: Ubuntu / Debian (apt-get). Uses sudo internally (or runs as root).
 #
 # Usage:
-#   ./bin/install-prerequisites.sh                 # install + configure
-#   ./bin/install-prerequisites.sh --check         # audit only, change nothing
-#   ./bin/install-prerequisites.sh --with-virt-manager
+#   ./install-prerequisites.sh                 # install + configure
+#   ./install-prerequisites.sh --check         # audit only, change nothing
+#   ./install-prerequisites.sh --with-virt-manager
 #
 # Environment variables (all optional):
 #   VIRT_USERNAME    User to add to libvirt/kvm (default: $SUDO_USER, else $USER)

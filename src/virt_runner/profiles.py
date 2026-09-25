@@ -1,8 +1,8 @@
 """Distro profiles — per-distro image/user/boot data for ``create``.
 
 Data-driven profiles per the generalization spec
-(``specification/features/generalize-vm-creation-specification.md``); this
-slice lands exactly two. Pipeline code (``cmd_create`` / ``virtualizer``)
+(``specification/features/generalize-vm-creation-specification.md``); three
+profiles: ubuntu, arch, fedora. Pipeline code (``cmd_create`` / ``virtualizer``)
 stays free of distro-name conditionals.
 """
 

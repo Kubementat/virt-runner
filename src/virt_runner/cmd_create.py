@@ -120,7 +120,7 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
 @click.option(
     "--user",
     default=None,
-    help="Cloud user name [default: per-distro: ubuntu/arch]",
+    help="Cloud user name [default: per-distro: ubuntu/arch/fedora]",
 )
 @click.option(
     "--ssh-key",
@@ -146,7 +146,7 @@ def cmd_create(
     vcpu: int,
     disk: int,
     distro: str,
-    release: str,
+    release: str | None,
     image: str | None,
     user: str | None,
     ssh_key: str,

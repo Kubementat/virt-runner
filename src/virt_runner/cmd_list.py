@@ -74,7 +74,7 @@ def _text_block(vm: VmInfo) -> list[str]:
     "recorded at create; default: per-VM, else ubuntu)",
 )
 def cmd_list(user: str | None, as_json: bool) -> None:
-    """List VMs configured by vm-create (disk in the vm-pool)."""
+    """List VMs created by virt-runner (disk in the vm-pool)."""
     output.set_json_mode(as_json)
     v = Virtualizer()
     identity = Virtualizer.private_key_path(Virtualizer.DEFAULT_SSH_KEY)
@@ -117,7 +117,7 @@ def cmd_list(user: str | None, as_json: bool) -> None:
 
     if not vms:
         click.echo(
-            f"No VMs configured in pool '{v.POOL}' (vm-create <name> to create one)."
+            f"No VMs configured in pool '{v.POOL}' (virt-runner create <name> to create one)."
         )
         return
 

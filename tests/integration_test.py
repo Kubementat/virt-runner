@@ -2,8 +2,8 @@
 
 Run with: uv run tests/integration_test.py
 
-Flow: create 2 Ubuntu VMs + 1 Arch VM -> list -> ssh hello world in each
--> ssh <name> session in each -> destroy all -> list (expect 0).
+Flow: create 2 Ubuntu VMs + 1 Arch VM + 1 Fedora VM -> list -> ssh hello world
+in each -> ssh <name> session in each -> destroy all -> list (expect 0).
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ def main() -> None:
     check(doc["vm"]["ssh_user"] == "fedora", f"create {FEDORA_NAME} uses user fedora")
     check(doc["vm"]["ip"] is not None, f"{FEDORA_NAME} has an IP")
 
-    # 2. List -> our three VMs present (foreign VMs in the pool are none of
+    # 2. List -> our four VMs present (foreign VMs in the pool are none of
     # the suite's business).
     doc = virt_runner("list")
     listed = [vm["name"] for vm in doc["vms"]]

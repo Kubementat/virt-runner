@@ -9,8 +9,8 @@ warnings are dropped (they are represented by the document), so
 ``virt-runner <cmd> --json | jq .`` is clean even though a terminal merges
 stderr into the display.
 
-    {"tool": "vm-create", "version": "0.2.0", "status": "success", "error": null, ...}
-    {"tool": "vm-create", "version": "0.2.0", "status": "error", "error": {...}}
+    {"tool": "vm-create", "version": "…", "status": "success", "error": null, ...}
+    {"tool": "vm-create", "version": "…", "status": "error", "error": {...}}
 
 ``VM_JSON_TRACE=1`` re-sends the otherwise-dropped progress/warning lines to
 **stderr**, which keeps stdout parseable while debugging a long run that would
