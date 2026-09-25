@@ -104,6 +104,55 @@ def main() -> None:
     finally:
         images._spawn = real_spawn
 
+    # _glob_candidates — newest first; empty for non-glob or no match.
+    try:
+        images._spawn = fake(0, html)
+        cands = images._glob_candidates(gurl)
+        assert [u.rsplit("/", 1)[-1] for u in cands] == [
+            "Fedora-Cloud-Base-Generic-44-1.10.x86_64.qcow2",
+            "Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2",
+        ], cands
+        assert images._glob_candidates("https://x/images/plain.img") == []
+        images._spawn = fake(6, "")
+        assert images._glob_candidates(gurl, Path(tempfile.mkdtemp())) == []
+    finally:
+        images._spawn = real_spawn
+
+    # fetch_and_verify_image — dead newest candidate (404) falls back to
+    # the next-newest name.
+    import os
+
+    dead = "https://x/images/Fedora-Cloud-Base-Generic-44-1.10.x86_64.qcow2"
+    live = "https://x/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2"
+    listing2 = (
+        f'<a href="{dead.rsplit("/", 1)[-1]}"><a href="{live.rsplit("/", 1)[-1]}">'
+    )
+    cache = Path(tempfile.mkdtemp(prefix="vr-img-"))
+    downloads: list[str] = []
+    real_fetch_sums = images._fetch_sums
+
+    def fake_fetch(cmd):
+        if "-o" in cmd:
+            target, src = cmd[cmd.index("-o") + 1], cmd[-1]
+            downloads.append(src)
+            if src == dead:
+                return subprocess.CompletedProcess(cmd, 22)  # 404
+            Path(target).write_bytes(b"img")
+            return subprocess.CompletedProcess(cmd, 0)
+        return subprocess.CompletedProcess(cmd, 0, stdout=listing2)
+
+    os.environ["VM_CREATE_CACHE_DIR"] = str(cache)
+    try:
+        images._spawn = fake_fetch
+        images._fetch_sums = lambda url, dest: False
+        fetched = images.fetch_and_verify_image(fed, "44", False, gurl, False, False)
+        assert fetched.path.endswith("44-1.7.x86_64.qcow2"), fetched.path
+        assert downloads == [dead, live], downloads
+    finally:
+        images._spawn = real_spawn
+        images._fetch_sums = real_fetch_sums
+        os.environ.pop("VM_CREATE_CACHE_DIR", None)
+
     # render_user_data — key line appears JSON-quoted, output starts with #cloud-config.
     user_data = render_user_data("testuser", "sudo", "ssh-ed25519 # comment: key")
     assert user_data.startswith("#cloud-config")

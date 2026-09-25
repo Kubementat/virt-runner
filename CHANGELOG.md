@@ -33,6 +33,11 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ### Fixed
 
+- **Fedora image download 404s** — during point releases some mirrors keep a
+  stale index that still lists a build whose file is gone; the glob resolved
+  to that dead "newest" name and the download failed. The glob now resolves
+  to all candidates (newest first) and falls back to the next-newest name on
+  a download failure (see `docs/lessons-learned/006-fedora-mirror-inconsistency.md`).
 - **Fedora checksum verification** — the CHECKSUM filename was derived from
   the image basename instead of the compose name, causing a 404 and silent
   skip of verification. Now resolved via the distro profile's ``sums_url``
