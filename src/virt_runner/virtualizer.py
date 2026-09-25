@@ -120,10 +120,20 @@ def _passthrough(cmd: list[str]) -> subprocess.CompletedProcess[str]:
         cmd,
         stdout=sys.stderr if output.is_json_mode() else None,
         stderr=None,
-        text=True,
         check=False,
         env=_CHILD_ENV,
     )
+
+
+def _ssh_args(identity: str | None) -> list[str]:
+    """Host-key policy for throwaway DHCP guests + the injected key only."""
+    return [
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        *(["-i", identity, "-o", "IdentitiesOnly=yes"] if identity else []),
+    ]
 
 
 def _non_empty_file(path: Path) -> bool:
@@ -1201,11 +1211,7 @@ class Virtualizer:
             "ConnectTimeout=2",
             "-o",
             "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            *(["-i", identity, "-o", "IdentitiesOnly=yes"] if identity else []),
+            *_ssh_args(identity),
             f"{user}@{ip}",
             "exit",
         ]
@@ -1252,22 +1258,8 @@ class Virtualizer:
         handled like :meth:`verify_ssh_reachable`: DHCP recycles these
         addresses between throwaway guests.
         """
-        cmd = [
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            *(["-i", identity, "-o", "IdentitiesOnly=yes"] if identity else []),
-            f"{user}@{ip}",
-        ]
-        return subprocess.run(
-            cmd,
-            stdout=sys.stderr if output.is_json_mode() else None,
-            stderr=None,
-            check=False,
-            env=_CHILD_ENV,
-        ).returncode
+        cmd = ["ssh", *_ssh_args(identity), f"{user}@{ip}"]
+        return _passthrough(cmd).returncode
 
     # ------------------------------------------------------------------
     # List
