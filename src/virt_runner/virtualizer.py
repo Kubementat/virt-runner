@@ -649,17 +649,27 @@ class Virtualizer:
                 img_ok = False
                 fail_msg = f"download failed: {image_url}"
         else:
-            # curl with retries (matches bash: curl -fL --retry 3). A timeout
-            # counts as a failed download; the partial file is removed below.
-            try:
-                result = _spawn(
-                    ["curl", "-fL", "--retry", "3", "-o", str(img_path), image_url],
-                    timeout=600,
-                )
-                downloaded = result.returncode == 0
-            except subprocess.TimeoutExpired:
-                downloaded = False
-            if not downloaded:
+            # curl with retries (matches bash: curl -fL --retry 3). Stall
+            # detection replaces a hard timeout: only a transfer that stays
+            # under 10 KB/s for 60 s aborts. The partial file is removed below.
+            result = _spawn(
+                [
+                    "curl",
+                    "-fL",
+                    "--retry",
+                    "3",
+                    "--speed-limit",
+                    "10240",
+                    "--speed-time",
+                    "60",
+                    "-A",
+                    USER_AGENT,
+                    "-o",
+                    str(img_path),
+                    image_url,
+                ]
+            )
+            if result.returncode != 0:
                 img_ok = False
                 fail_msg = f"download failed: {image_url}"
 
