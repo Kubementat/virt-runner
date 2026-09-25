@@ -124,8 +124,11 @@ directory. `GUEST` defaults to `/mnt/<basename of HOST>` and must be an absolute
 with components matching `[A-Za-z0-9._-]` (no `.` or `..` component, no spaces,
 and no commas in the host path — virt-install splits sub-options on commas).
 
-The mount is ready as soon as `create` returns (cloud-init `bootcmd` runs before sshd)
-and persists across guest reboots. It is read-write; UIDs pass straight through
+The mount is ready as soon as `create` returns (cloud-init `bootcmd` runs before
+sshd). It persists across guest reboots: the first boot also writes a `nofail`
+fstab entry, because the NoCloud seed is only attached for the first boot and
+some images (e.g. Ubuntu 26.04) disable cloud-init entirely on later boots —
+fstab is what keeps the mount alive then. It is read-write; UIDs pass straight through
 (guest user `ubuntu`/`arch`/`fedora` is uid 1000, matching the usual host user).
 Files created by root in the guest are root-owned on the host.
 

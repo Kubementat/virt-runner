@@ -268,6 +268,14 @@ def main() -> None:
                 (share / f"from-{vm['name']}").exists(),
                 f"{vm['name']} writes to the host share",
             )
+            # fstab fallback: the NoCloud seed CDROM is first-boot-only, so the
+            # bootcmd also records a nofail fstab entry to keep the mount across
+            # later reboots when cloud-init no longer runs.
+            fstab = ssh_run(vm["ssh_command"], "grep virtiofs /etc/fstab || true")
+            check(
+                "nofail" in fstab and "/mnt/share" in fstab,
+                f"{vm['name']} recorded the virtiofs fstab entry",
+            )
 
         # 3b. `ssh <name>` opens a real session in the VM — stdin is /dev/null,
         # so the remote shell sees EOF and exits 0; a non-zero exit fails the run.

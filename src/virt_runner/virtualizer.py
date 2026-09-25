@@ -219,14 +219,20 @@ def render_user_data(
 ) -> str:
     """Generate cloud-init user-data YAML with JSON-quoted scalars.
 
-    Each mount becomes an idempotent ``bootcmd`` line. bootcmd runs on every
-    boot, before sshd, so the share is mounted by the time SSH answers.
+    Each mount becomes an idempotent ``bootcmd`` line. bootcmd runs on the
+    first boot, before sshd, so the share is mounted by the time SSH answers.
+    It also records an fstab entry: the NoCloud seed is only attached for the
+    first boot (virt-install), and images whose cloud-init disables itself
+    when no datasource is present (e.g. Ubuntu 26.04) never re-run bootcmd,
+    so fstab is what keeps the mount across later reboots.
     """
     bootcmd = "".join(
         "  - "
         + json.dumps(
-            f"mkdir -p {m['target']} && (mountpoint -q {m['target']} || "
-            f"mount -t virtiofs {m['tag']} {m['target']})"
+            f"mkdir -p {m['target']} && "
+            f"(grep -Fq ' {m['target']} ' /etc/fstab || "
+            f"echo '{m['tag']} {m['target']} virtiofs defaults,nofail 0 0' >> /etc/fstab) && "
+            f"(mountpoint -q {m['target']} || mount -t virtiofs {m['tag']} {m['target']})"
         )
         + "\n"
         for m in mounts

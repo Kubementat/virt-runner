@@ -10,9 +10,33 @@ is the device-node form used by 9p/virtio-serial transports. A virtiofs tag is
 resolves via the vhost-user socket. Using `mounts:` would produce an invalid
 `fs_spec` and the mount would fail silently.
 
-`bootcmd` runs on **every** boot (in `cloud-init.service`, which is
-`Before=sshd.service`), so the mount is in place before SSH answers. It also
-survives guest reboots without needing fstab entries.
+`bootcmd` (in `cloud-init-local`, `Before=sshd.service`) runs on the **first**
+boot, so the mount is in place before SSH answers.
+
+## The mount does NOT survive reboots from bootcmd alone (found in review)
+
+The plan assumed `bootcmd` re-runs on every boot. It does not, on this stack:
+
+1. `virt-install --cloud-init` attaches the NoCloud seed CDROM **only for the
+   first boot** (man page: "The device is only attached for the first boot";
+   the domain XML afterwards shows an empty CDROM).
+2. On Ubuntu 26.04 the `cloud-init-generator` runs `ds-identify` at every boot;
+   with no seed it exits 1 ("no datasource found") and the generator
+   **disables cloud-init entirely** (`ON_NOTFOUND=disabled`). All the
+   `cloud-init-*` stage services then no-op silently, so even
+   `frequency: always` `bootcmd` lines never run again.
+
+Observed: `sudo reboot` in the guest → domain stays running, but
+`mount | grep virtiofs` is empty afterwards.
+
+**Fix (applied):** the bootcmd line also writes an idempotent
+`<tag> <target> virtiofs defaults,nofail 0 0` entry to `/etc/fstab` on the
+first boot. fstab lives on disk, so systemd mounts the share on every later
+boot even with cloud-init disabled. `nofail` keeps the guest bootable if the
+share is ever missing.
+
+(Older images, e.g. Ubuntu 24.04, re-run cached "always" modules without a
+seed, where bootcmd alone suffices — the fstab entry is harmless there.)
 
 ## Fedora SELinux
 

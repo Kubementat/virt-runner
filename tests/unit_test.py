@@ -170,6 +170,10 @@ def main() -> None:
     assert "bootcmd:\n" in ud
     assert "mount -t virtiofs mount1 /work/src" in ud
     assert "mountpoint -q /work/src" in ud
+    # fstab fallback: the NoCloud seed is first-boot-only, so later reboots
+    # mount from fstab (cloud-init may be disabled then, e.g. Ubuntu 26.04).
+    assert "/etc/fstab" in ud
+    assert "mount1 /work/src virtiofs defaults,nofail 0 0" in ud
 
     # create_vm — mounts add shared memory + one --filesystem per mount.
     captured = {}

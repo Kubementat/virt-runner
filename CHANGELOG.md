@@ -11,7 +11,8 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 - **`create --mount HOST[:GUEST]`** — repeatable flag to share a host directory into
   the guest via virtiofs. The mount is ready when `create` returns and persists across
-  guest reboots (cloud-init `bootcmd`). Default guest path is `/mnt/<basename of HOST>`.
+  guest reboots (first-boot `bootcmd` mount plus an fstab entry, since the NoCloud
+  seed is first-boot-only). Default guest path is `/mnt/<basename of HOST>`.
   Requires the `virtiofsd` package (installed by `install-prerequisites.sh`).
 - **`vm.mounts` in `--json` output** — always present (empty list when no mounts).
 - **`virtiofsd-missing` error code** — `--mount` given but `/usr/libexec/virtiofsd`
