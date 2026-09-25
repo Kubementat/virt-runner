@@ -1,9 +1,9 @@
 """Pure-logic checks (no libvirt, no network). Run: uv run tests/unit_test.py"""
 
-from virt_runner import virtualizer as vz
 from virt_runner.cmd_create import _validate_user
+from virt_runner.images import _newest_match, _sums_entries
 from virt_runner.profiles import PROFILES, _same_dir
-from virt_runner.virtualizer import _newest_match, render_meta_data, render_user_data
+from virt_runner.virtualizer import Virtualizer, render_meta_data, render_user_data
 
 
 def main() -> None:
@@ -26,7 +26,7 @@ def main() -> None:
     assert arch.sums_url("https://example/arch.img").endswith(".SHA256")
 
     # _sums_entries — sha256sum line.
-    entries = vz.Virtualizer._sums_entries(
+    entries = _sums_entries(
         "aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabb  file.img\n"
     )
     assert entries == [
@@ -34,7 +34,7 @@ def main() -> None:
     ]
 
     # _sums_entries — *binary marker.
-    entries = vz.Virtualizer._sums_entries(
+    entries = _sums_entries(
         "ddeeff00112233445566778899aabbccddeeff00112233445566778899aabbcc *binary.img\n"
     )
     assert entries == [
@@ -45,7 +45,7 @@ def main() -> None:
     ]
 
     # _sums_entries — PGP-wrapped Fedora block (header/signature ignored).
-    entries = vz.Virtualizer._sums_entries(
+    entries = _sums_entries(
         "-----BEGIN PGP SIGNED MESSAGE-----\n"
         "Hash: SHA256\n\n"
         "SHA256 (Fedora-Cloud-44-1.7-x86_64-CHECKSUM) = aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabb\n"
@@ -57,7 +57,7 @@ def main() -> None:
     assert entries[0][0] == "Fedora-Cloud-44-1.7-x86_64-CHECKSUM"
 
     # _sums_entries — junk lines ignored.
-    entries = vz.Virtualizer._sums_entries("not a hash\n\nmore junk\n")
+    entries = _sums_entries("not a hash\n\nmore junk\n")
     assert entries == []
 
     # _newest_match — 1.10 beats 1.7.
@@ -80,6 +80,17 @@ def main() -> None:
     meta = render_meta_data("abc-123", "myvm")
     assert "id: abc-123" in meta
     assert "local-hostname: myvm" in meta
+
+    # 1.8 — preflight refuses non-x86_64 hosts.
+    from virt_runner.errors import VirtError
+
+    v = Virtualizer()
+    v.host_arch = lambda: "aarch64"
+    try:
+        v.preflight_check()
+        raise AssertionError("expected VirtError")
+    except VirtError as e:
+        assert e.code == "unsupported-arch", e.code
 
     # _validate_user — good value passes through.
     assert _validate_user(None, None, "ubuntu") == "ubuntu"

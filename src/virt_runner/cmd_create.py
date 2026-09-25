@@ -16,8 +16,9 @@ import click
 
 from virt_runner import output
 from virt_runner.args import command
+from virt_runner.images import ImageFetch, fetch_and_verify_image
 from virt_runner.profiles import PROFILES
-from virt_runner.virtualizer import ImageFetch, Virtualizer, lease_file
+from virt_runner.virtualizer import Virtualizer, lease_file
 
 _DEFAULT_CODE = {
     "preflight": "libvirt-unreachable",
@@ -236,7 +237,7 @@ def cmd_create(
         v.ensure_ssh_key(ssh_key)
 
         stage = "image"
-        image_fetch: ImageFetch = v.fetch_and_verify_image(
+        image_fetch: ImageFetch = fetch_and_verify_image(
             profile=profile,
             release=effective_release,
             release_given=release_given,
