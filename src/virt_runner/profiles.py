@@ -8,8 +8,14 @@ stays free of distro-name conditionals.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
+
+
+def _same_dir(url: str, name: str) -> str:
+    """Return ``url``'s directory concatenated with *name*."""
+    return url.rsplit("/", 1)[0] + "/" + name
 
 
 @dataclass(frozen=True)
@@ -22,7 +28,7 @@ class DistroProfile:
     sudo_group: str
     os_variant: str
     image_url: Callable[[str], str]  # release -> full image URL
-    sums_kind: str  # "dir" (same-dir SHA256SUMS) | "sidecar" (<url>.SHA256)
+    sums_url: Callable[[str], str]  # image_url -> checksum file URL
     cache_prefix: str = ""  # extra cache dir under the cache root
     releases: tuple[str, ...] | None = None  # None = any; else allowed set
 
@@ -37,7 +43,7 @@ PROFILES: dict[str, DistroProfile] = {
         image_url=lambda r: (
             f"https://cloud-images.ubuntu.com/{r}/current/{r}-server-cloudimg-amd64.img"
         ),
-        sums_kind="dir",
+        sums_url=lambda u: _same_dir(u, "SHA256SUMS"),
     ),
     "arch": DistroProfile(
         name="arch",
@@ -53,7 +59,7 @@ PROFILES: dict[str, DistroProfile] = {
             "https://fastly.mirror.pkgbuild.com/images/latest/"
             "Arch-Linux-x86_64-cloudimg.qcow2"
         ),
-        sums_kind="sidecar",
+        sums_url=lambda u: u + ".SHA256",
         cache_prefix="arch",
         releases=("latest",),
     ),
@@ -75,7 +81,14 @@ PROFILES: dict[str, DistroProfile] = {
         # Fedora publishes PGP-signed CHECKSUM files:
         # Fedora-Cloud-{release}-{point}-x86_64-CHECKSUM
         # Format: "SHA256 (<filename>) = <hash>" inside a PGP wrapper.
-        sums_kind="block",
+        sums_url=lambda u: _same_dir(
+            u,
+            re.sub(
+                r"^Fedora-Cloud-Base-Generic-(.+)\.x86_64\.qcow2$",
+                r"Fedora-Cloud-\1-x86_64-CHECKSUM",
+                u.rsplit("/", 1)[-1],
+            ),
+        ),
         cache_prefix="fedora",
         releases=None,  # any numeric release works via the URL template
     ),

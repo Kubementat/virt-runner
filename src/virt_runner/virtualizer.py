@@ -37,7 +37,7 @@ from typing import Any
 
 from virt_runner import output
 from virt_runner.errors import VirtError
-from virt_runner.profiles import DistroProfile
+from virt_runner.profiles import DistroProfile, _same_dir
 
 # ---------------------------------------------------------------------------
 # Subprocess helpers
@@ -217,6 +217,11 @@ def ip_status_for(state: str, mac: str, ip: str) -> str:
 # ---------------------------------------------------------------------------
 # Virtualizer
 # ---------------------------------------------------------------------------
+
+_SUMS_LINE = re.compile(
+    r"^(?:SHA256\s+\((?P<bn>.+?)\)\s+=\s+(?P<bh>[0-9a-fA-F]{64})"
+    r"|(?P<h>[0-9a-fA-F]{64})\s+\*?(?P<n>\S.*?))\s*$"
+)
 
 
 class Virtualizer:
@@ -456,16 +461,7 @@ class Virtualizer:
         if release_given or not image_given:
             # Standard release path (image_url is the profile's release URL).
             img_basename = image_url.rsplit("/", 1)[-1]
-            if profile.sums_kind == "dir":
-                sums_url = image_url.rsplit("/", 1)[0] + "/SHA256SUMS"
-            elif profile.sums_kind == "sidecar":
-                sums_url = image_url + ".SHA256"
-            else:  # block (Fedora PGP block-format CHECKSUM)
-                sums_url = (
-                    image_url.rsplit("/", 1)[0]
-                    + "/"
-                    + img_basename.replace(".x86_64.qcow2", "-x86_64-CHECKSUM")
-                )
+            sums_url = profile.sums_url(image_url)
             verifiable = True
             if profile.cache_prefix:
                 cache_dir = cache_dir / profile.cache_prefix / release
@@ -474,7 +470,7 @@ class Virtualizer:
         else:
             # Bare --image path.
             img_basename = image_url.rsplit("/", 1)[-1]
-            sums_url = image_url.rsplit("/", 1)[0] + "/SHA256SUMS"
+            sums_url = _same_dir(image_url, "SHA256SUMS")
             scheme = image_url.split("://")[0] if "://" in image_url else ""
             verifiable = scheme in ("file", "http", "https")
             cache_dir = cache_dir / "custom"
@@ -547,10 +543,7 @@ class Virtualizer:
                 # locally, so no external sha256sum and no cwd dependency.
                 # Dispatch parser by sums_kind: "block" (Fedora PGP block
                 # format) needs a different regex than sha256sum-compatible.
-                if profile.sums_kind == "block":
-                    entries = self._sums_block(sums_path.read_text(errors="replace"))
-                else:
-                    entries = self._sums_entries(sums_path.read_text(errors="replace"))
+                entries = self._sums_entries(sums_path.read_text(errors="replace"))
                 expected = [h for name, h in entries if name == img_basename]
                 fail_code = "image-verification-failed"
                 if len(expected) != 1:
@@ -622,40 +615,12 @@ class Virtualizer:
 
     @staticmethod
     def _sums_entries(sums_text: str) -> list[tuple[str, str]]:
-        """Parse sha256sum-format text into ``(filename, hex_digest)`` pairs.
-
-        Accepts ``<hash>  <name>`` and the binary-mode marker
-        ``<hash> *<name>``; blank and malformed lines are ignored.
-        """
+        """``(filename, sha256)`` pairs from sha256sum *or* BSD/Fedora ``SHA256 (f) = h`` lines."""
         entries = []
         for line in sums_text.splitlines():
-            fields = line.strip().split(None, 1)
-            if len(fields) != 2:
-                continue
-            digest, name = fields[0], fields[1].strip()
-            if not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
-                continue
-            # Optional binary-mode marker.
-            entries.append((name.removeprefix("*"), digest.lower()))
-        return entries
-
-    @staticmethod
-    def _sums_block(sums_text: str) -> list[tuple[str, str]]:
-        """Parse PGP block-format CHECKSUM text into ``(filename, hex_digest)`` pairs.
-
-        Format::
-
-            SHA256 (Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2) = <hash>
-
-        The PGP wrapper (-----BEGIN PGP SIGNED MESSAGE-----, Hash:,
-        -----BEGIN PGP SIGNATURE-----) is parsed around, not verified.
-        TLS to the official origin is the trust anchor.
-        """
-        entries = []
-        for line in sums_text.splitlines():
-            m = re.match(r"^SHA256\s+\((.+?)\)\s+=\s+([0-9a-fA-F]{64})", line)
+            m = _SUMS_LINE.match(line.strip())
             if m:
-                entries.append((m.group(1), m.group(2).lower()))
+                entries.append(((m["bn"] or m["n"]), (m["bh"] or m["h"]).lower()))
         return entries
 
     @staticmethod

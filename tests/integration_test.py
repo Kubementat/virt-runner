@@ -90,6 +90,7 @@ def main() -> None:
         check(doc["status"] == "success", f"create {name} succeeded")
         check(doc["booted"], f"{name} booted")
         check(doc["vm"]["ip"] is not None, f"{name} has an IP")
+        check(doc["image"]["verified"], f"{name} image verified")
 
     # 1b. Arch leg: distro profile, arch-boxes image + sidecar .SHA256,
     # wheel-group user `arch`, `generic` osinfo boot.
@@ -110,6 +111,7 @@ def main() -> None:
     check(doc["vm"]["distro"] == "arch", f"create {ARCH_NAME} reports distro arch")
     check(doc["vm"]["ssh_user"] == "arch", f"create {ARCH_NAME} uses user arch")
     check(doc["vm"]["ip"] is not None, f"{ARCH_NAME} has an IP")
+    check(doc["image"]["verified"], f"{ARCH_NAME} image verified")
 
     # 1c. Fedora leg: profile, Fedora cloud image + block-format checksum,
     # wheel-group user `fedora`, `generic` osinfo boot.
@@ -132,6 +134,7 @@ def main() -> None:
     )
     check(doc["vm"]["ssh_user"] == "fedora", f"create {FEDORA_NAME} uses user fedora")
     check(doc["vm"]["ip"] is not None, f"{FEDORA_NAME} has an IP")
+    check(doc["image"]["verified"], f"{FEDORA_NAME} image verified")
 
     # 2. List -> our four VMs present (foreign VMs in the pool are none of
     # the suite's business).
