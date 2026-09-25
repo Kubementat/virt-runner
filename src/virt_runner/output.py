@@ -211,6 +211,17 @@ def access_commands(
     }
 
 
+def text_access_lines(name: str) -> list[str]:
+    """The Console/Teardown lines shared by ``create`` and ``list`` (spec §4.6)."""
+    return [
+        f"Console: virsh console {name}     (Ctrl-] to detach)",
+        (
+            f"Teardown: virt-runner destroy {name}   "
+            f"(or: virsh destroy {name} && virsh undefine {name})"
+        ),
+    ]
+
+
 def fail_with(
     command: str,
     exc: BaseException,

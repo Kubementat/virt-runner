@@ -310,8 +310,5 @@ def cmd_create(
         click.echo(f"Distro:  {distro} {effective_release}")
         click.echo(f"IP:      {ip}   (also reachable as {name}.default)")
         click.echo(f"SSH:     virt-runner ssh {name}")
-    click.echo(f"Console: virsh console {name}     (Ctrl-] to detach)")
-    click.echo(
-        f"Teardown: virt-runner destroy {name}   "
-        f"(or: virsh destroy {name} && virsh undefine {name})"
-    )
+    for line in output.text_access_lines(name):
+        click.echo(line)

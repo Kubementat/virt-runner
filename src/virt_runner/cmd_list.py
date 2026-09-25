@@ -57,11 +57,7 @@ def _text_block(vm: VmInfo) -> list[str]:
         f"Name:    {vm.name}   (UUID {vm.uuid})",
         ip_line,
         ssh_line,
-        f"Console: virsh console {vm.name}     (Ctrl-] to detach)",
-        (
-            f"Teardown: virt-runner destroy {vm.name}   "
-            f"(or: virsh destroy {vm.name} && virsh undefine {vm.name})"
-        ),
+        *output.text_access_lines(vm.name),
     ]
 
 
