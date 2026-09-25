@@ -85,4 +85,4 @@ def command(name: str, **kwargs: Any) -> Any:
 
 def _wants_json(args: list[str]) -> bool:
     """Pre-scan raw arguments for the ``--json`` flag."""
-    return "--json" in list(args or [])
+    return "--json" in args

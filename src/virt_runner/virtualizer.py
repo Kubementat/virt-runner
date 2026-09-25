@@ -384,7 +384,7 @@ class Virtualizer:
         """True if *name* is a defined domain (``virsh dominfo`` succeeds)."""
         return _spawn(["virsh", "dominfo", name]).returncode == 0
 
-    def libvirt_reachable(self) -> None:
+    def require_libvirt(self) -> None:
         """Raise unless ``virsh list`` succeeds.
 
         ``libvirtd`` may be socket-activated — never check ``systemctl``.
@@ -395,7 +395,7 @@ class Virtualizer:
                 "libvirt-unreachable",
             )
 
-    def pool_exists(self) -> None:
+    def require_pool_defined(self) -> None:
         """Raise unless the storage pool is defined (any state).
 
         Used by ``list``, which can report VMs in an inactive pool.
@@ -419,7 +419,7 @@ class Virtualizer:
             )
 
         # 1. libvirt reachable
-        self.libvirt_reachable()
+        self.require_libvirt()
 
         # 2. storage pool active
         pools = _stdout(["virsh", "pool-list", "--all"])
@@ -439,15 +439,15 @@ class Virtualizer:
                 "preflight",
             )
 
-    def domain_not_defined(self, name: str) -> None:
+    def require_domain_absent(self, name: str) -> None:
         """Raise if *name* is already a defined domain."""
         if self.domain_exists(name):
             raise VirtError(
                 f"VM '{name}' already defined", "vm-already-defined", "preflight"
             )
 
-    def ensure_ssh_key(self, path: str) -> str:
-        """Return *path* as a usable public key, generating the keypair if absent.
+    def ensure_ssh_key(self, path: str) -> None:
+        """Ensure *path* is a usable public key, generating the keypair if absent.
 
         A missing key is created with ``ssh-keygen`` (ed25519, no passphrase),
         so a first run on a fresh host needs no manual key setup. The private
@@ -460,7 +460,7 @@ class Virtualizer:
                 :attr:`DEFAULT_SSH_KEY`).
 
         Returns:
-            *path* unchanged, so the caller keeps using one value throughout.
+            ``None``; the caller keeps using *path* throughout.
 
         Raises:
             VirtError: ``ssh-key-missing`` when no key can be prepared at
@@ -470,7 +470,7 @@ class Virtualizer:
         """
         key = Path(path)
         if _non_empty_file(key):
-            return path
+            return None
 
         if not path.endswith(".pub"):
             raise VirtError(
@@ -494,7 +494,7 @@ class Virtualizer:
                 )
             key.write_text(f"{derived.stdout.strip()}\n")
             output.progress(f"Derived public key from {private}: {path}")
-            return path
+            return None
 
         # Empty placeholders are replaced, not refused.
         for stale in (private, key):
@@ -530,7 +530,7 @@ class Virtualizer:
                 "preflight",
             )
         output.progress(f"Generated SSH keypair: {path}")
-        return path
+        return None
 
     @staticmethod
     def host_arch() -> str:
@@ -554,7 +554,7 @@ class Virtualizer:
         """Download + verify cloud image.
 
         Args:
-            profile: the distro profile (image URL, sums kind, cache dir).
+            profile: the distro profile (image URL, sums URL, cache dir).
             release: release codename (e.g. ``resolute``).
             release_given: whether ``--release`` was explicitly passed.
             image_url: the effective image URL (the release pattern unless
@@ -672,8 +672,7 @@ class Virtualizer:
                 # substring match also picks up sibling entries (e.g.
                 # 'foo.img' inside 'other-foo.img'). The digest is computed
                 # locally, so no external sha256sum and no cwd dependency.
-                # Dispatch parser by sums_kind: "block" (Fedora PGP block
-                # format) needs a different regex than sha256sum-compatible.
+                # _sums_entries handles both sha256sum and Fedora PGP-block lines.
                 entries = self._sums_entries(sums_path.read_text(errors="replace"))
                 expected = [h for name, h in entries if name == img_basename]
                 fail_code = "image-verification-failed"
@@ -1268,10 +1267,9 @@ class Virtualizer:
     def get_pool_path(self) -> str:
         """Return the pool's directory path from its XML definition."""
         xml = _stdout(["virsh", "pool-dumpxml", self.POOL])
-        for line in xml.splitlines():
-            match = re.search(r"<path>([^<]*)</path>", line)
-            if match:
-                return match.group(1)
+        match = re.search(r"<path>([^<]*)</path>", xml)
+        if match:
+            return match.group(1)
         raise VirtError(
             f"failed to determine path of pool '{self.POOL}'",
             "pool-path-unknown",

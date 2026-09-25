@@ -22,7 +22,7 @@ def cmd_ssh(name: str, user: str | None, as_json: bool) -> None:
     v = Virtualizer()
 
     try:
-        v.libvirt_reachable()
+        v.require_libvirt()
         if not v.domain_exists(name):
             output.fail(
                 "ssh",

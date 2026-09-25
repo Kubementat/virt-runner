@@ -18,7 +18,7 @@ def cmd_destroy(name: str, as_json: bool) -> None:
 
     # Preflight: libvirt must be reachable.
     try:
-        v.libvirt_reachable()
+        v.require_libvirt()
     except RuntimeError as exc:
         output.fail_with("destroy", exc, "libvirt-unreachable", fields={"name": name})
 

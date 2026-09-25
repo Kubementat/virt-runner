@@ -19,7 +19,7 @@ def _vm_document(vm: VmInfo, display_user: str, identity: str) -> dict[str, Any]
     need to parse a placeholder sentence.
     """
     leased = vm.ip_status == IP_STATUS_LEASE
-    ip = vm.ip or None if leased else None
+    ip = (vm.ip or None) if leased else None
     ssh_user = display_user if leased else None
     return {
         "name": vm.name,
@@ -77,8 +77,8 @@ def cmd_list(user: str | None, as_json: bool) -> None:
     # pool *defined* (an inactive pool still has listable VMs). The network is
     # irrelevant here, so it is not checked.
     try:
-        v.libvirt_reachable()
-        v.pool_exists()
+        v.require_libvirt()
+        v.require_pool_defined()
 
         vms = v.list_vms(lease_file=lease_file("list"))
     except RuntimeError as exc:

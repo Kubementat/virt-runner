@@ -231,7 +231,7 @@ def cmd_create(
     ip = None
     try:
         v.preflight_check()
-        v.domain_not_defined(name)
+        v.require_domain_absent(name)
         # Generated on first use when absent, so no manual key setup is needed.
         v.ensure_ssh_key(ssh_key)
 
