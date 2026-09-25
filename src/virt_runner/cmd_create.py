@@ -110,7 +110,7 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
     "--release",
     default=None,
     help="Release (Ubuntu codename, e.g. resolute; "
-    "Arch: 'latest') [default: per-distro]",
+    "Arch/Fedora: release number) [default: per-distro]",
 )
 @click.option(
     "--image",
@@ -154,7 +154,7 @@ def cmd_create(
     keep_going: bool,
     as_json: bool,
 ) -> None:
-    """Create and boot a KVM VM (Ubuntu or Arch) via libvirt (qemu:///system)."""
+    """Create and boot a KVM VM (Ubuntu, Arch, or Fedora) via libvirt (qemu:///system)."""
     output.set_json_mode(as_json)
     v = Virtualizer()
     profile = PROFILES[distro]

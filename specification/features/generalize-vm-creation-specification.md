@@ -580,6 +580,13 @@ that arch's directory listing (an aarch64 tree may lag — pitfall 20).
 | Serial console | yes expected (historical Fedora cloud images ship `console=ttyS0,115200`) — verify-on-first-run via `virsh console` during first boot |
 | osinfo candidates | `fedora{release} fedora{release-1} … fedora42 generic` (DB verified to stop at fedora42) |
 
+**Implementation status (2026-09-25):** Implemented. Profile entry added to
+`PROFILES` in `profiles.py` (`sums_kind="block"`, `os_variant="generic"`,
+`cache_prefix="fedora"`). The `sums_kind="block"` parser (`_sums_block`)
+is implemented in `virtualizer.py` and wired into
+`fetch_and_verify_image`. Fedora is the third supported distro alongside
+Ubuntu and Arch.
+
 ### 5.4 Debian
 
 | Fact | Value |

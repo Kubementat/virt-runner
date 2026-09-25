@@ -17,6 +17,12 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
   profiles per the generalization spec); `--user` and `--release` defaults
   are now per-distro.
 
+- **Fedora guests** — `virt-runner create NAME --distro fedora` boots the
+  Fedora Cloud Base image (x86_64, release 44, user `fedora`) through the
+  existing pipeline: PGP block-format checksum verification, `wheel`-group
+  user, `generic` osinfo. New `sums_kind="block"` parser in
+  `virtualizer.py` handles Fedora's PGP-signed CHECKSUM files.
+
 ## [0.1.0] - 2026-08-25
 
 ### Added

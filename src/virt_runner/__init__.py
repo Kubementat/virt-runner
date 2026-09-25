@@ -1,4 +1,4 @@
-"""virt-runner — one-command KVM VM creation (Ubuntu, Arch) via libvirt + cloud-init."""
+"""virt-runner — one-command KVM VM creation (Ubuntu, Arch, Fedora) via libvirt + cloud-init."""
 
 from virt_runner.virtualizer import Virtualizer
 

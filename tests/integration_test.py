@@ -15,7 +15,8 @@ import sys
 
 NAMES = ["it-vm-a", "it-vm-b"]
 ARCH_NAME = "it-vm-arch"
-ALL = NAMES + [ARCH_NAME]
+FEDORA_NAME = "it-vm-fedora"
+ALL = NAMES + [ARCH_NAME, FEDORA_NAME]
 
 
 def virt_runner(*args: str, allow_fail: bool = False) -> dict:
@@ -100,6 +101,26 @@ def main() -> None:
     check(doc["vm"]["distro"] == "arch", f"create {ARCH_NAME} reports distro arch")
     check(doc["vm"]["ssh_user"] == "arch", f"create {ARCH_NAME} uses user arch")
     check(doc["vm"]["ip"] is not None, f"{ARCH_NAME} has an IP")
+
+    # 1c. Fedora leg: profile, Fedora cloud image + block-format checksum,
+    # wheel-group user `fedora`, `generic` osinfo boot.
+    doc = virt_runner(
+        "create",
+        "--distro",
+        "fedora",
+        "--ram",
+        "1",
+        "--vcpu",
+        "1",
+        "--disk",
+        "8",
+        FEDORA_NAME,
+    )
+    check(doc["status"] == "success", f"create {FEDORA_NAME} succeeded")
+    check(doc["booted"], f"{FEDORA_NAME} booted")
+    check(doc["vm"]["distro"] == "fedora", f"create {FEDORA_NAME} reports distro fedora")
+    check(doc["vm"]["ssh_user"] == "fedora", f"create {FEDORA_NAME} uses user fedora")
+    check(doc["vm"]["ip"] is not None, f"{FEDORA_NAME} has an IP")
 
     # 2. List -> our three VMs present (foreign VMs in the pool are none of
     # the suite's business).

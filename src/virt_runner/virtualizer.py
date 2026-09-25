@@ -22,6 +22,7 @@ import json
 import os
 import platform
 import re
+import fnmatch
 import shutil
 import subprocess
 import sys
@@ -448,15 +449,25 @@ class Virtualizer:
         )
         cache_dir = Path(cache_root)
 
+        # Resolve any glob in the image URL (Fedora uses rotating filenames).
+        image_url = self._resolve_glob(image_url)
+
         # Determine image path and verification settings.
         if release_given or not image_given:
             # Standard release path (image_url is the profile's release URL).
             img_basename = image_url.rsplit("/", 1)[-1]
-            sums_url = (
-                image_url.rsplit("/", 1)[0] + "/SHA256SUMS"
-                if profile.sums_kind == "dir"
-                else image_url + ".SHA256"
-            )
+            if profile.sums_kind == "dir":
+                sums_url = image_url.rsplit("/", 1)[0] + "/SHA256SUMS"
+            elif profile.sums_kind == "sidecar":
+                sums_url = image_url + ".SHA256"
+            else:  # block (Fedora PGP block-format CHECKSUM)
+                sums_url = (
+                    image_url.rsplit("/", 1)[0]
+                    + "/"
+                    + img_basename.replace(
+                        ".x86_64.qcow2", "-x86_64-CHECKSUM"
+                    )
+                )
             verifiable = True
             if profile.cache_prefix:
                 cache_dir = cache_dir / profile.cache_prefix / release
@@ -536,7 +547,16 @@ class Virtualizer:
                 # substring match also picks up sibling entries (e.g.
                 # 'foo.img' inside 'other-foo.img'). The digest is computed
                 # locally, so no external sha256sum and no cwd dependency.
-                entries = self._sums_entries(sums_path.read_text(errors="replace"))
+                # Dispatch parser by sums_kind: "block" (Fedora PGP block
+                # format) needs a different regex than sha256sum-compatible.
+                if profile.sums_kind == "block":
+                    entries = self._sums_block(
+                        sums_path.read_text(errors="replace")
+                    )
+                else:
+                    entries = self._sums_entries(
+                        sums_path.read_text(errors="replace")
+                    )
                 expected = [h for name, h in entries if name == img_basename]
                 fail_code = "image-verification-failed"
                 if len(expected) != 1:
@@ -624,6 +644,52 @@ class Virtualizer:
             # Optional binary-mode marker.
             entries.append((name.removeprefix("*"), digest.lower()))
         return entries
+
+    @staticmethod
+    def _sums_block(sums_text: str) -> list[tuple[str, str]]:
+        """Parse PGP block-format CHECKSUM text into ``(filename, hex_digest)`` pairs.
+
+        Format::
+
+            SHA256 (Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2) = <hash>
+
+        The PGP wrapper (-----BEGIN PGP SIGNED MESSAGE-----, Hash:,
+        -----BEGIN PGP SIGNATURE-----) is parsed around, not verified.
+        TLS to the official origin is the trust anchor.
+        """
+        entries = []
+        for line in sums_text.splitlines():
+            m = re.match(
+                r"^SHA256\s+\((.+?)\)\s+=\s+([0-9a-fA-F]{64})", line
+            )
+            if m:
+                entries.append((m.group(1), m.group(2).lower()))
+        return entries
+
+    @staticmethod
+    def _resolve_glob(url: str) -> str:
+        """Resolve a URL containing ``*`` by listing the directory.
+
+        Returns a concrete URL when *url* contains ``*``; otherwise returns
+        *url* unchanged.  The listing is fetched via ``curl -s -L`` and
+        ``.qcow2`` filenames matching the glob are extracted from the HTML.
+        """
+        if "*" not in url:
+            return url
+        # Fetch directory listing and extract matching .qcow2 filenames.
+        result = _spawn(["curl", "-s", "-L", url.rsplit("/", 1)[0] + "/"])
+        if result.returncode != 0:
+            return url  # fall through: download will fail with a clear error
+        # Extract .qcow2 filenames from the HTML listing.
+        filenames = re.findall(
+            r'href="([^"]+\.qcow2)"', result.stdout
+        )
+        # Filter to entries matching the glob pattern.
+        pattern = url.rsplit("/", 1)[-1]
+        for name in filenames:
+            if fnmatch.fnmatch(name, pattern):
+                return url.rsplit("/", 1)[0] + "/" + name
+        return url  # no match found; let the download fail with a clear error
 
     @staticmethod
     def _sha256_of(path: Path) -> str:
