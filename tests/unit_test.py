@@ -1,7 +1,8 @@
 """Pure-logic checks (no libvirt, no network). Run: uv run tests/unit_test.py"""
 
+import virt_runner.virtualizer as vz
 from virt_runner import images
-from virt_runner.cmd_create import _validate_user
+from virt_runner.cmd_create import _validate_mounts, _validate_user
 from virt_runner.errors import VirtError
 from virt_runner.images import _newest_match, _resolve_glob, _sums_entries
 from virt_runner.profiles import PROFILES, _same_dir
@@ -133,6 +134,80 @@ def main() -> None:
         raise AssertionError("expected BadParameter")
     except click.BadParameter:
         pass
+
+    # _validate_mounts — default guest path, explicit guest path, tags by position.
+    share = Path(tempfile.mkdtemp(prefix="vr-share-"))
+    got = _validate_mounts(None, None, (str(share), f"{share}:/work/src"))
+    assert got == [
+        {
+            "source": str(share.resolve()),
+            "target": f"/mnt/{share.name}",
+            "tag": "mount0",
+        },
+        {"source": str(share.resolve()), "target": "/work/src", "tag": "mount1"},
+    ], got
+    assert _validate_mounts(None, None, ()) == []
+
+    # _validate_mounts — each bad input is a usage error.
+    comma = Path(tempfile.mkdtemp(prefix="vr,share-"))
+    for bad in (
+        ("/nonexistent/dir",),  # missing host dir
+        (f"{share}:relative",),  # guest not absolute
+        (f"{share}:/mnt/a b",),  # unsafe char
+        (f"{share}:/mnt/..",),  # dot-dot component
+        (f"{share}:/x", f"{share}:/x"),  # duplicate guest path
+        (str(comma),),  # comma in host path
+    ):
+        try:
+            _validate_mounts(None, None, bad)
+            raise AssertionError(f"expected BadParameter for {bad}")
+        except click.BadParameter:
+            pass
+
+    # render_user_data — no mounts: no bootcmd; with mounts: idempotent virtiofs line.
+    assert "bootcmd" not in render_user_data("u", "sudo", "k")
+    ud = render_user_data("u", "sudo", "k", got)
+    assert "bootcmd:\n" in ud
+    assert "mount -t virtiofs mount1 /work/src" in ud
+    assert "mountpoint -q /work/src" in ud
+
+    # create_vm — mounts add shared memory + one --filesystem per mount.
+    captured = {}
+    real_pt = vz._passthrough
+    try:
+        vz._passthrough = lambda cmd: (
+            captured.setdefault("cmd", cmd),
+            subprocess.CompletedProcess(cmd, 0),
+        )[1]
+        Virtualizer().create_vm(
+            "n",
+            1024,
+            1,
+            "vol",
+            "52:54:00:00:00:01",
+            "u",
+            "m",
+            "generic",
+            no_boot=False,
+            mounts=got,
+        )
+    finally:
+        vz._passthrough = real_pt
+    cmd = captured["cmd"]
+    assert "source.type=memfd,access.mode=shared" in cmd
+    assert sum(a == "--filesystem" for a in cmd) == 2
+    assert f"source.dir={share.resolve()},target.dir=mount0,driver.type=virtiofs," in (
+        " ".join(cmd)
+    )
+
+    # require_virtiofsd — missing binary is virtiofsd-missing.
+    v2 = Virtualizer()
+    v2.VIRTIOFSD = "/nonexistent/virtiofsd"
+    try:
+        v2.require_virtiofsd()
+        raise AssertionError("expected VirtError")
+    except VirtError as e:
+        assert e.code == "virtiofsd-missing", e.code
 
     print("unit checks ok")
 

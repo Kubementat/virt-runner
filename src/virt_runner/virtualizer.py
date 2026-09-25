@@ -214,8 +214,23 @@ def ip_status_for(state: str, mac: str, ip: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def render_user_data(user_name: str, group: str, key_line: str) -> str:
-    """Generate cloud-init user-data YAML with JSON-quoted scalars."""
+def render_user_data(
+    user_name: str, group: str, key_line: str, mounts: list[dict[str, str]] = ()
+) -> str:
+    """Generate cloud-init user-data YAML with JSON-quoted scalars.
+
+    Each mount becomes an idempotent ``bootcmd`` line. bootcmd runs on every
+    boot, before sshd, so the share is mounted by the time SSH answers.
+    """
+    bootcmd = "".join(
+        "  - "
+        + json.dumps(
+            f"mkdir -p {m['target']} && (mountpoint -q {m['target']} || "
+            f"mount -t virtiofs {m['tag']} {m['target']})"
+        )
+        + "\n"
+        for m in mounts
+    )
     return (
         "#cloud-config\n"
         "manage_etc_hosts: true\n"
@@ -225,7 +240,7 @@ def render_user_data(user_name: str, group: str, key_line: str) -> str:
         '    sudo: ["ALL=(ALL) NOPASSWD:ALL"]\n'
         "    ssh_authorized_keys:\n"
         f"      - {json.dumps(key_line)}\n"
-        "package_update: false\n"
+        "package_update: false\n" + (f"bootcmd:\n{bootcmd}" if mounts else "")
     )
 
 
@@ -273,6 +288,9 @@ class Virtualizer:
     DEFAULT_USER = "ubuntu"
     DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh/virt_runner_key.pub")
     DEFAULT_LEASE_FILE = "/var/lib/libvirt/dnsmasq/virbr0.status"
+
+    #: virtiofs daemon started by libvirt for `create --mount` (Debian/Ubuntu path).
+    VIRTIOFSD = "/usr/libexec/virtiofsd"
 
     #: Poll cadence for the lease and SSH windows (PI-13).
     POLL_INTERVAL_S = 2
@@ -363,6 +381,16 @@ class Virtualizer:
         if self.domain_exists(name):
             raise VirtError(
                 f"VM '{name}' already defined", "vm-already-defined", "preflight"
+            )
+
+    def require_virtiofsd(self) -> None:
+        """Raise unless the virtiofs daemon needed by ``--mount`` is installed."""
+        if not os.access(self.VIRTIOFSD, os.X_OK):
+            raise VirtError(
+                f"preflight failed: {self.VIRTIOFSD} not found (needed by --mount) "
+                "— install the 'virtiofsd' package",
+                "virtiofsd-missing",
+                "preflight",
             )
 
     def ensure_ssh_key(self, path: str) -> None:
@@ -467,6 +495,7 @@ class Virtualizer:
         user_name: str,
         sudo_group: str,
         ssh_key: str,
+        mounts: list[dict[str, str]] = (),
     ) -> tuple[str, str]:
         """Generate cloud-init user-data and meta-data files.
 
@@ -488,7 +517,7 @@ class Virtualizer:
 
         # meta-data and user-data via pure renderers.
         meta_data = render_meta_data(new_id, name)
-        user_data = render_user_data(user_name, sudo_group, ssh_key_line)
+        user_data = render_user_data(user_name, sudo_group, ssh_key_line, mounts)
 
         (Path(tmp_dir) / "meta-data").write_text(meta_data)
         (Path(tmp_dir) / "user-data").write_text(user_data)
@@ -628,6 +657,7 @@ class Virtualizer:
         cloud_init_meta_data: str,
         os_variant: str,
         no_boot: bool,
+        mounts: list[dict[str, str]] = (),
     ) -> str:
         """Create a VM via virt-install.
 
@@ -670,6 +700,15 @@ class Virtualizer:
             # PI-11: autostart always.
             "--autostart",
         ]
+
+        if mounts:
+            # virtiofs requires guest RAM shared with the virtiofsd process.
+            cmd += ["--memorybacking", "source.type=memfd,access.mode=shared"]
+        for m in mounts:
+            cmd += [
+                "--filesystem",
+                f"source.dir={m['source']},target.dir={m['tag']},driver.type=virtiofs,binary.path={self.VIRTIOFSD}",
+            ]
 
         if _passthrough(cmd).returncode != 0:
             # Clean up orphan resources.
