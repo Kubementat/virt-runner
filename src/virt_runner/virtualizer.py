@@ -964,7 +964,7 @@ class Virtualizer:
             "pool-path-unknown",
         )
 
-    def _first_disk_in_pool(self, root: ET.Element, pool_path: str) -> bool:
+    def _has_disk_in_pool(self, root: ET.Element, pool_path: str) -> bool:
         """True if any of the domain's disk sources lives under *pool_path*.
 
         Compared on path components: a bare prefix match would also accept a
@@ -995,7 +995,7 @@ class Virtualizer:
         results = []
         for name in domain_names:
             root = self.domain_xml(name)
-            if root is None or not self._first_disk_in_pool(root, pool_path):
+            if root is None or not self._has_disk_in_pool(root, pool_path):
                 continue
 
             state = self.get_domain_state(name)

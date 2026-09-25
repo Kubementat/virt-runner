@@ -54,45 +54,35 @@ def _newest_match(names: list[str], pattern: str) -> str | None:
 
 
 def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
-    """Resolve a URL containing ``*`` by listing the directory.
+    """Resolve a URL containing ``*`` to the newest matching ``.qcow2``.
 
-    Returns a concrete URL when *url* contains ``*``; otherwise returns
-    *url* unchanged.  The listing is fetched via ``curl -s -L`` and
-    ``.qcow2`` filenames matching the glob are extracted from the HTML.
+    Returns *url* unchanged when it has no ``*``. Otherwise the directory
+    listing is fetched (``curl -s -L``) and the newest matching name wins;
+    when the listing is unavailable, a warm cache in *cache_dir* serves
+    offline. Raises ``VirtError`` rather than letting a literal ``*`` flow
+    into cache paths.
     """
     if "*" not in url:
         return url
-    dir_url = url.rsplit("/", 1)[0] + "/"
-    pattern = url.rsplit("/", 1)[-1]
-    # Fetch directory listing and extract matching .qcow2 filenames.
+    dir_url, pattern = url.rsplit("/", 1)
+    dir_url += "/"
     result = _spawn(["curl", "-s", "-L", "-A", USER_AGENT, dir_url])
-    if result.returncode != 0:
-        # Offline: try the cache.
-        if cache_dir is not None:
-            base = url.rsplit("/", 1)[-1].rsplit("*", 1)[0]
-            candidate = _newest_match(os.listdir(cache_dir), base + "*.qcow2")
-            if candidate:
-                return dir_url + candidate
-        return url  # fall through: download will fail with a clear error
-    # Extract .qcow2 filenames from the HTML listing.
-    filenames = re.findall(r'href="([^"]+\.qcow2)"', result.stdout)
-    # Filter to entries matching the glob pattern.
-    for name in filenames:
-        if fnmatch.fnmatch(name, pattern):
-            return dir_url + name
-    # No match found and not offline — raise to avoid literal * in paths.
-    if cache_dir is None:
+    names = (
+        re.findall(r'href="([^"]+\.qcow2)"', result.stdout)
+        if result.returncode == 0
+        else []
+    )
+    if not any(fnmatch.fnmatch(n, pattern) for n in names):
+        # Listing unavailable or empty: fall back to what the cache holds.
+        names = os.listdir(cache_dir) if cache_dir and cache_dir.is_dir() else []
+    match = _newest_match(names, pattern)
+    if match is None:
         raise VirtError(
             f"no image matching {pattern} at {dir_url}",
             "image-download-failed",
             "image",
         )
-    candidate = _newest_match(os.listdir(cache_dir), pattern)
-    if candidate:
-        return dir_url + candidate
-    raise VirtError(
-        f"no image matching {pattern} at {dir_url}", "image-download-failed", "image"
-    )
+    return dir_url + match
 
 
 def _fetch_sums(sums_url: str, dest: Path) -> bool:
@@ -207,7 +197,7 @@ def fetch_and_verify_image(
     if img_path.exists():
         if keep_going:
             output.warn(
-                f"vm-create: warning: reusing cached image (no download): {img_path}"
+                f"virt-runner: warning: reusing cached image (no download): {img_path}"
             )
         output.progress(f"image ready: {img_path}")
         # The cache can hold unverified images (no derivable sums); the
@@ -222,6 +212,9 @@ def fetch_and_verify_image(
             verification=verification,
             verified=verification != "skipped",
         )
+
+    # A marker left by a deleted image must not vouch for the new download.
+    img_path.with_name(img_path.name + ".verified").unlink(missing_ok=True)
 
     # Download (D4): directly to the final name in the cache dir.
     img_ok = True
@@ -297,7 +290,7 @@ def fetch_and_verify_image(
             # D1: no derivable same-directory SHA256SUMS -> skip
             # verification, warn.
             output.warn(
-                f"vm-create: warning: no same-directory SHA256SUMS for "
+                f"virt-runner: warning: no same-directory SHA256SUMS for "
                 f"{image_url}; skipping verification"
             )
 

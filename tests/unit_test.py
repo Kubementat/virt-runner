@@ -1,7 +1,9 @@
 """Pure-logic checks (no libvirt, no network). Run: uv run tests/unit_test.py"""
 
+from virt_runner import images
 from virt_runner.cmd_create import _validate_user
-from virt_runner.images import _newest_match, _sums_entries
+from virt_runner.errors import VirtError
+from virt_runner.images import _newest_match, _resolve_glob, _sums_entries
 from virt_runner.profiles import PROFILES, _same_dir
 from virt_runner.virtualizer import Virtualizer, render_meta_data, render_user_data
 
@@ -71,6 +73,36 @@ def main() -> None:
     # _newest_match — no match returns None.
     assert _newest_match(["foo.txt"], "*.qcow2") is None
 
+    # _resolve_glob — newest wins online; offline falls back to cache or raises.
+    import subprocess
+    import tempfile
+    from pathlib import Path
+
+    def fake(rc, out):
+        return lambda *a, **k: subprocess.CompletedProcess(a, rc, out, "")
+
+    gurl = "https://x/images/Fedora-Cloud-Base-Generic-44-*.x86_64.qcow2"
+    html = (
+        '<a href="Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2">'
+        '<a href="Fedora-Cloud-Base-Generic-44-1.10.x86_64.qcow2">'
+    )
+    real_spawn = images._spawn
+    try:
+        images._spawn = fake(0, html)
+        assert _resolve_glob(gurl).endswith("44-1.10.x86_64.qcow2")
+        images._spawn = fake(6, "")
+        for cdir in (Path("/nonexistent/x"), Path(tempfile.mkdtemp())):
+            try:
+                _resolve_glob(gurl, cdir)
+                raise AssertionError("expected VirtError")
+            except VirtError as e:
+                assert e.code == "image-download-failed", e.code
+        warm = Path(tempfile.mkdtemp())
+        (warm / "Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2").touch()
+        assert _resolve_glob(gurl, warm).endswith("44-1.7.x86_64.qcow2")
+    finally:
+        images._spawn = real_spawn
+
     # render_user_data — key line appears JSON-quoted, output starts with #cloud-config.
     user_data = render_user_data("testuser", "sudo", "ssh-ed25519 # comment: key")
     assert user_data.startswith("#cloud-config")
@@ -82,8 +114,6 @@ def main() -> None:
     assert "local-hostname: myvm" in meta
 
     # 1.8 — preflight refuses non-x86_64 hosts.
-    from virt_runner.errors import VirtError
-
     v = Virtualizer()
     v.host_arch = lambda: "aarch64"
     try:
