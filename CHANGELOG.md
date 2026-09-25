@@ -7,6 +7,19 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ## [Unreleased]
 
+### Changed
+
+- **`create` preflight failures** — the error document now includes
+  `"booted": false` like every other stage (key addition only).
+- **Image downloads** — the hard 600 s subprocess timeout is replaced by
+  curl's stall detection (`--speed-limit 10240 --speed-time 60`); a
+  transfer only aborts when it stays under 10 KB/s for 60 s.
+- **`virt-install` flags** — the redundant `clouduser-ssh-key=` cloud-init
+  parameter is dropped (the injected key comes from user-data; verified on
+  all four distro legs), and `--console none` is replaced by
+  `--noautoconsole` so the recommended `virsh console NAME` actually has a
+  serial console device to attach to.
+
 ### Fixed
 
 - **Fedora checksum verification** — the CHECKSUM filename was derived from
@@ -33,21 +46,48 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 - **Non-x86_64 host refusal** — ``preflight_check`` now rejects hosts whose
   ``uname -m`` is not ``x86_64`` with error code ``unsupported-arch``.
 
+## [0.3.0] - 2026-09-25
+
 ### Added
+
+- **Fedora guests** — `virt-runner create NAME --distro fedora` boots the
+  Fedora Cloud Base image (x86_64, release 44, user `fedora`) through the
+  existing pipeline: block-format checksum verification, `wheel`-group
+  user, `generic` osinfo (commit `d3e91e6`).
 
 - **Arch Linux guests** — `virt-runner create NAME --distro arch` boots the
   official arch-boxes cloud image (`cloud-init`/NoCloud preinstalled,
   x86_64-only, release `latest`) through the existing pipeline: sidecar
-  `.SHA256` verification, `wheel`-group user `arch`, `generic` osinfo.
-  Distro data now lives in `src/virt_runner/profiles.py` (data-driven
-  profiles per the generalization spec); `--user` and `--release` defaults
-  are now per-distro.
+  `.SHA256` verification, `wheel`-group user `arch`, `generic` osinfo
+  (commit `f680c3f`). Distro data lives in `src/virt_runner/profiles.py`
+  (data-driven profiles per the generalization spec); `--user` and
+  `--release` defaults are per-distro.
 
-- **Fedora guests** — `virt-runner create NAME --distro fedora` boots the
-  Fedora Cloud Base image (x86_64, release 44, user `fedora`) through the
-  existing pipeline: PGP block-format checksum verification, `wheel`-group
-  user, `generic` osinfo. New `sums_kind="block"` parser in
-  `virtualizer.py` handles Fedora's PGP-signed CHECKSUM files.
+- **Per-VM user metadata** — `create` records the cloud user (and SSH
+  identity) in the domain's libvirt metadata; `ssh` and `list` read it back
+  so they log in as the user that was actually created (commit `9c612df`).
+
+### Fixed
+
+- **Child `PATH`** — spawned host tools now run with the venv's `bin` dir
+  stripped from `PATH`, so `#!/usr/bin/env python3` shebangs resolve the
+  host interpreter, not the isolated one (commit `df970ac`).
+
+## [0.2.0] - 2026-09-01
+
+### Added
+
+- **Python rewrite of the POC bash scripts** — `bin/vm-create`/`vm-destroy`
+  replaced by the `virt-runner` CLI package (`cli → cmd_* → virtualizer →
+  core`), stdlib + `click`, same pipeline and host tools (`virsh`,
+  `virt-install`, `curl`, `ssh`) (commit `89000e0`).
+- **`ssh NAME` subcommand** — interactive shell on a VM: resolves the IP
+  from the DHCP lease (or `domifaddr`), logs in with the injected key and
+  the user recorded at create, passes through ssh's exit code
+  (commit `fcbb2fb`).
+- **Integration test suite** — `tests/integration_test.py` end-to-end run
+  against the real host (create Ubuntu + list + ssh hello world + destroy),
+  every call through `--json` (commit `c3e5be8`).
 
 ## [0.1.0] - 2026-08-25
 
@@ -55,7 +95,7 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 - **Project scaffold** — repository initialized
   (`c35c32b`, "chore: initial commit — project scaffold").
-- **POC specification v1.0** — `specification/specification.md`: purpose,
+- **POC specification v1.0** — `specification/specification.md` (since removed): purpose,
   environment requirements, CLI contract, six-step pipeline, verified host
   facts & URLs, known pitfalls, acceptance criteria, decisions D1–D10
   (ticket: spec phase; commit `7583a72`).
@@ -67,19 +107,19 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
   self-contained ticket per slice with deliverables, safety rules, checkable
   acceptance criteria, and commit messages (ticket: ticketing phase;
   commit `6a7aa60`).
-- **`bin/vm-create` — skeleton, CLI parsing, preflight checks**
+- **`bin/vm-create` (since removed) — skeleton, CLI parsing, preflight checks**
   (ticket 01 / slice S1; commit `c979e86`): shebang + `set -euo pipefail`,
   all defaults per spec §3.1, usage/help, full flag parsing incl. D1
   `--release`-over-`--image` precedence, `NAME` regex validation, and all
   five preflight checks with exit codes 0/1/2.
-- **`bin/vm-create` — image download, SHA256 verification, cache reuse**
+- **`bin/vm-create` (since removed) — image download, SHA256 verification, cache reuse**
   (ticket 02 / slice S2; commit `865402b`): `fetch_and_verify_image()` with
   the `~/vm-images/<release>/` (and `custom/`) cache layout, D4
   download-to-final-name + in-place `sha256sum -c` verification, no
   partial/corrupt files left behind, D1 skip-verify-with-warning path for
   non-derivable sums, `--keep-going`, and the `VM_CREATE_CACHE_DIR` test
   hook.
-- **`bin/vm-create` — cloud-init file generation**
+- **`bin/vm-create` (since removed) — cloud-init file generation**
   (ticket 03 / slice S3; commit `36a8bf1`): `generate_cloud_init_files()`
   writing NoCloud `user-data` (injected SSH key, `--user` per D2,
   passwordless sudo, `package_update: false`, no `network:` section) and
@@ -87,7 +127,7 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
   `local-hostname:` required for NoCloud to apply the hostname — recorded
   deviation) into a `mktemp` dir with `chmod 600` + trap cleanup, and the
   `VM_CREATE_CLOUD_INIT_DUMP` test hook.
-- **`bin/vm-create` — VM creation via `virt-install`**
+- **`bin/vm-create` (since removed) — VM creation via `virt-install`**
   (ticket 04 / slice S4; commit `5e55cb9`): fixed-MAC generation
   (`52:54:00:` + 3 random bytes, colon-formatted), the full virt-install
   invocation (fixed `vm-pool` disk `<NAME>_vda.qcow2`, `default` network,
@@ -97,7 +137,7 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
   virt-install 4.1.0 (pre-created volume + `--disk vol=` instead of
   `--location --import` + `--disk size=`; `--extra-args console=ttyS0`
   omitted — both recorded in the script header).
-- **`bin/vm-create` — wait-for-IP, mandatory SSH verification, access info**
+- **`bin/vm-create` (since removed) — wait-for-IP, mandatory SSH verification, access info**
   (ticket 05 / slice S5; commit `876dc5c`): lease-file polling
   (2 s × 60, case-insensitive fixed-MAC match; JSON parser with `jq` /
   `python3` fallback plus legacy 2/3-column fallback — the real
@@ -106,7 +146,7 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
   `virsh domifaddr` / `arp -n` fallbacks, the mandatory SSH probe before
   any success output (D6/AC3), timeout errors naming `virsh console <NAME>`,
   and the exact spec §3.1 success block (D9).
-- **`bin/vm-destroy` — companion teardown script**
+- **`bin/vm-destroy` (since removed) — companion teardown script**
   (ticket 06 / slice S6; commit `51828eb`): defined-domain preflight
   (exit 1), destroy-if-running → undefine → `virsh vol-delete
   <NAME>_vda.qcow2 vm-pool`, D7 missing-volume tolerance (warning + exit 0),
