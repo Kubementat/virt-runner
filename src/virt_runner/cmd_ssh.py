@@ -16,8 +16,7 @@ from virt_runner.virtualizer import Virtualizer
 @click.option(
     "--user",
     default=None,
-    help="User name to log in as "
-    "[default: user recorded at create, else ubuntu]",
+    help="User name to log in as [default: user recorded at create, else ubuntu]",
 )
 def cmd_ssh(name: str, user: str | None, as_json: bool) -> None:
     """Open an interactive SSH shell on VM <NAME>."""

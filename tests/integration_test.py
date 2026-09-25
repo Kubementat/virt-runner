@@ -51,12 +51,21 @@ def ssh_hello(world: str, ssh_command: str) -> None:
     # Run exactly the ssh_command virt-runner reports, plus non-interactive
     # options, to prove the printed line is copy-paste ready.
     parts = shlex.split(ssh_command)
-    cmd = parts[:1] + [
-        "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "ConnectTimeout=10",
-    ] + parts[1:] + [f"echo {world}"]
+    cmd = (
+        parts[:1]
+        + [
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=10",
+        ]
+        + parts[1:]
+        + [f"echo {world}"]
+    )
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     assert proc.returncode == 0, f"ssh failed ({' '.join(cmd)}): {proc.stderr}"
     assert world in proc.stdout, f"expected {world!r} in stdout, got {proc.stdout!r}"
@@ -118,7 +127,9 @@ def main() -> None:
     )
     check(doc["status"] == "success", f"create {FEDORA_NAME} succeeded")
     check(doc["booted"], f"{FEDORA_NAME} booted")
-    check(doc["vm"]["distro"] == "fedora", f"create {FEDORA_NAME} reports distro fedora")
+    check(
+        doc["vm"]["distro"] == "fedora", f"create {FEDORA_NAME} reports distro fedora"
+    )
     check(doc["vm"]["ssh_user"] == "fedora", f"create {FEDORA_NAME} uses user fedora")
     check(doc["vm"]["ip"] is not None, f"{FEDORA_NAME} has an IP")
 
@@ -133,8 +144,7 @@ def main() -> None:
     arch_entry = next(vm for vm in doc["vms"] if vm["name"] == ARCH_NAME)
     check(
         arch_entry["ssh_user"] == "arch",
-        f"list reports per-VM user arch for {ARCH_NAME}, "
-        f"got {arch_entry['ssh_user']}",
+        f"list reports per-VM user arch for {ARCH_NAME}, got {arch_entry['ssh_user']}",
     )
 
     # 3. SSH hello world into each VM (one-shot ssh disconnects on its own).

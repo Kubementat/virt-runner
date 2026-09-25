@@ -17,12 +17,12 @@ helpers below so that ``check`` is always explicit and no call site repeats
 from __future__ import annotations
 
 import atexit
+import fnmatch
 import hashlib
 import json
 import os
 import platform
 import re
-import fnmatch
 import shutil
 import subprocess
 import sys
@@ -464,9 +464,7 @@ class Virtualizer:
                 sums_url = (
                     image_url.rsplit("/", 1)[0]
                     + "/"
-                    + img_basename.replace(
-                        ".x86_64.qcow2", "-x86_64-CHECKSUM"
-                    )
+                    + img_basename.replace(".x86_64.qcow2", "-x86_64-CHECKSUM")
                 )
             verifiable = True
             if profile.cache_prefix:
@@ -550,13 +548,9 @@ class Virtualizer:
                 # Dispatch parser by sums_kind: "block" (Fedora PGP block
                 # format) needs a different regex than sha256sum-compatible.
                 if profile.sums_kind == "block":
-                    entries = self._sums_block(
-                        sums_path.read_text(errors="replace")
-                    )
+                    entries = self._sums_block(sums_path.read_text(errors="replace"))
                 else:
-                    entries = self._sums_entries(
-                        sums_path.read_text(errors="replace")
-                    )
+                    entries = self._sums_entries(sums_path.read_text(errors="replace"))
                 expected = [h for name, h in entries if name == img_basename]
                 fail_code = "image-verification-failed"
                 if len(expected) != 1:
@@ -659,9 +653,7 @@ class Virtualizer:
         """
         entries = []
         for line in sums_text.splitlines():
-            m = re.match(
-                r"^SHA256\s+\((.+?)\)\s+=\s+([0-9a-fA-F]{64})", line
-            )
+            m = re.match(r"^SHA256\s+\((.+?)\)\s+=\s+([0-9a-fA-F]{64})", line)
             if m:
                 entries.append((m.group(1), m.group(2).lower()))
         return entries
@@ -681,9 +673,7 @@ class Virtualizer:
         if result.returncode != 0:
             return url  # fall through: download will fail with a clear error
         # Extract .qcow2 filenames from the HTML listing.
-        filenames = re.findall(
-            r'href="([^"]+\.qcow2)"', result.stdout
-        )
+        filenames = re.findall(r'href="([^"]+\.qcow2)"', result.stdout)
         # Filter to entries matching the glob pattern.
         pattern = url.rsplit("/", 1)[-1]
         for name in filenames:
@@ -1146,9 +1136,7 @@ class Virtualizer:
             "StrictHostKeyChecking=no",
             "-o",
             "UserKnownHostsFile=/dev/null",
-            *(
-                ["-i", identity, "-o", "IdentitiesOnly=yes"] if identity else []
-            ),
+            *(["-i", identity, "-o", "IdentitiesOnly=yes"] if identity else []),
             f"{user}@{ip}",
             "exit",
         ]
@@ -1202,9 +1190,7 @@ class Virtualizer:
             "StrictHostKeyChecking=no",
             "-o",
             "UserKnownHostsFile=/dev/null",
-            *(
-                ["-i", identity, "-o", "IdentitiesOnly=yes"] if identity else []
-            ),
+            *(["-i", identity, "-o", "IdentitiesOnly=yes"] if identity else []),
             f"{user}@{ip}",
         ]
         return subprocess.run(
