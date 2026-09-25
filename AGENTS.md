@@ -18,3 +18,5 @@ When discovering bugs / problems AND solutions to those worth remembering: write
 The project uses a minimal integration testsuite that runs the core feature workflows. 
 The testsuite is started via: `uv run tests/integration_test.py`
 When adding new features ensure to add a minimal test case to `tests/integration_test.py`
+
+Pure-logic checks: `uv run tests/unit_test.py` (seconds, no KVM). Add a case for every parser or branch you touch.
