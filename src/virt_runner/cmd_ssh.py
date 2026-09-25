@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import os
-
 import click
 
 from virt_runner import output
 from virt_runner.args import command
-from virt_runner.virtualizer import Virtualizer
+from virt_runner.virtualizer import Virtualizer, lease_file
 
 
 @command(name="ssh")
@@ -41,14 +39,7 @@ def cmd_ssh(name: str, user: str | None, as_json: bool) -> None:
                 code="vm-not-running",
                 fields={"name": name, "state": state},
             )
-        lease_file = os.environ.get(
-            "VM_SSH_LEASE_FILE",
-            os.environ.get(
-                "VM_CREATE_LEASE_FILE",
-                Virtualizer.DEFAULT_LEASE_FILE,
-            ),
-        )
-        ip = v.vm_ip(name, lease_file)
+        ip = v.vm_ip(name, lease_file("ssh"))
         if not ip:
             output.fail(
                 "ssh",

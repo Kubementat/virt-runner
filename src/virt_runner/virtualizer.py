@@ -140,6 +140,13 @@ def volume_name(name: str) -> str:
     return f"{name}_vda.qcow2"
 
 
+def lease_file(command: str) -> str:
+    """``VM_<CMD>_LEASE_FILE`` > ``VM_CREATE_LEASE_FILE`` > the dnsmasq default."""
+    return os.environ.get(f"VM_{command.upper()}_LEASE_FILE") or os.environ.get(
+        "VM_CREATE_LEASE_FILE", Virtualizer.DEFAULT_LEASE_FILE
+    )
+
+
 # ---------------------------------------------------------------------------
 # Result records (rendered verbatim by the ``--json`` documents, spec §5.3)
 # ---------------------------------------------------------------------------

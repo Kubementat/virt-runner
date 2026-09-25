@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import click
 
 from virt_runner import output
 from virt_runner.args import command
-from virt_runner.virtualizer import IP_STATUS_LEASE, Virtualizer, VmInfo
+from virt_runner.virtualizer import IP_STATUS_LEASE, Virtualizer, VmInfo, lease_file
 
 
 def _vm_document(vm: VmInfo, display_user: str, identity: str) -> dict[str, Any]:
@@ -85,14 +84,7 @@ def cmd_list(user: str | None, as_json: bool) -> None:
         v.libvirt_reachable()
         v.pool_exists()
 
-        lease_file = os.environ.get(
-            "VM_LIST_LEASE_FILE",
-            os.environ.get(
-                "VM_CREATE_LEASE_FILE",
-                Virtualizer.DEFAULT_LEASE_FILE,
-            ),
-        )
-        vms = v.list_vms(lease_file=lease_file)
+        vms = v.list_vms(lease_file=lease_file("list"))
     except RuntimeError as exc:
         output.fail_with("list", exc, "pool-not-found")
 

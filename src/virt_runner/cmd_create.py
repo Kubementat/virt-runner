@@ -9,7 +9,6 @@ created ``vm``/``image`` sections still describe real resources.
 
 from __future__ import annotations
 
-import os
 import re
 from typing import Any
 
@@ -18,7 +17,7 @@ import click
 from virt_runner import output
 from virt_runner.args import command
 from virt_runner.profiles import PROFILES
-from virt_runner.virtualizer import ImageFetch, Virtualizer
+from virt_runner.virtualizer import ImageFetch, Virtualizer, lease_file
 
 _DEFAULT_CODE = {
     "preflight": "libvirt-unreachable",
@@ -277,11 +276,7 @@ def cmd_create(
 
         if not no_boot:
             stage = "wait-ip"
-            lease_file = os.environ.get(
-                "VM_CREATE_LEASE_FILE",
-                Virtualizer.DEFAULT_LEASE_FILE,
-            )
-            ip = v.wait_for_ip(name, mac, lease_file)
+            ip = v.wait_for_ip(name, mac, lease_file("create"))
             run_state["booted"] = True
             run_state["ip"] = ip
             output.progress(f"IP acquired: {ip}")
