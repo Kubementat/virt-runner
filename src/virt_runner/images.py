@@ -43,27 +43,26 @@ _SUMS_LINE = re.compile(
 )
 
 
+def _natural_key(s: str) -> list[int | str]:
+    """Natural-sort key: '44-1.10' > '44-1.7'."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
+
+
 def _newest_match(names: list[str], pattern: str) -> str | None:
     """Newest (natural-sort) name matching *pattern*: '44-1.10' > '44-1.7'."""
-
-    def _key(s: str) -> list[int | str]:
-        return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
-
     hits = [n for n in set(names) if fnmatch.fnmatch(n, pattern)]
-    return max(hits, key=_key) if hits else None
+    return max(hits, key=_natural_key) if hits else None
 
 
-def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
-    """Resolve a URL containing ``*`` to the newest matching ``.qcow2``.
+def _glob_candidates(url: str, cache_dir: Path | None = None) -> list[str]:
+    """All URLs matching a glob in *url*, newest first.
 
-    Returns *url* unchanged when it has no ``*``. Otherwise the directory
-    listing is fetched (``curl -s -L``) and the newest matching name wins;
-    when the listing is unavailable, a warm cache in *cache_dir* serves
-    offline. Raises ``VirtError`` rather than letting a literal ``*`` flow
-    into cache paths.
+    Empty list when *url* has no ``*`` or nothing matches. The directory
+    listing is fetched (``curl -s -L``); when the listing is unavailable,
+    a warm cache in *cache_dir* serves offline.
     """
     if "*" not in url:
-        return url
+        return []
     dir_url, pattern = url.rsplit("/", 1)
     dir_url += "/"
     result = _spawn(["curl", "-s", "-L", "-A", USER_AGENT, dir_url])
@@ -75,14 +74,28 @@ def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
     if not any(fnmatch.fnmatch(n, pattern) for n in names):
         # Listing unavailable or empty: fall back to what the cache holds.
         names = os.listdir(cache_dir) if cache_dir and cache_dir.is_dir() else []
-    match = _newest_match(names, pattern)
-    if match is None:
+    hits = [n for n in set(names) if fnmatch.fnmatch(n, pattern)]
+    hits.sort(key=_natural_key, reverse=True)
+    return [dir_url + n for n in hits]
+
+
+def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
+    """Resolve a URL containing ``*`` to the newest matching ``.qcow2``.
+
+    Returns *url* unchanged when it has no ``*``. Raises ``VirtError``
+    rather than letting a literal ``*`` flow into cache paths.
+    """
+    if "*" not in url:
+        return url
+    candidates = _glob_candidates(url, cache_dir)
+    if not candidates:
+        dir_url, pattern = url.rsplit("/", 1)
         raise VirtError(
-            f"no image matching {pattern} at {dir_url}",
+            f"no image matching {pattern} at {dir_url}/",
             "image-download-failed",
             "image",
         )
-    return dir_url + match
+    return candidates[0]
 
 
 def _fetch_sums(sums_url: str, dest: Path) -> bool:
@@ -173,7 +186,35 @@ def fetch_and_verify_image(
         )
 
     # Resolve any glob in the image URL (Fedora uses rotating filenames).
-    image_url = _resolve_glob(image_url, cache_dir)
+    # Mirror indexes are inconsistent during point releases: a build can
+    # still be listed while its file is gone (404). Try the candidates
+    # newest first; a download failure falls back to the next-newest name.
+    if "*" in image_url:
+        candidates = _glob_candidates(image_url, cache_dir)
+        if not candidates:
+            dir_url, pattern = image_url.rsplit("/", 1)
+            raise VirtError(
+                f"no image matching {pattern} at {dir_url}/",
+                "image-download-failed",
+                "image",
+            )
+        last: VirtError | None = None
+        for candidate in candidates:
+            try:
+                return fetch_and_verify_image(
+                    profile,
+                    release,
+                    release_given,
+                    candidate,
+                    image_given,
+                    keep_going,
+                )
+            except VirtError as e:
+                if e.code != "image-download-failed":
+                    raise
+                last = e
+        assert last is not None
+        raise last
 
     # Re-extract basename after glob resolution.
     img_basename = image_url.rsplit("/", 1)[-1]
