@@ -316,6 +316,16 @@ def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
     )
 
 
+def _poll(check, timeout_s: float, interval: float):
+    """Call *check* until it returns truthy or *timeout_s* elapses; return its last value."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        result = check()
+        if result or time.monotonic() >= deadline:
+            return result
+        time.sleep(interval)
+
+
 class Virtualizer:
     """Encapsulates every libvirt / VM operation.
 
@@ -1115,15 +1125,17 @@ class Virtualizer:
         interval = self.POLL_INTERVAL_S
         lease = Path(lease_file)
         lease_usable = lease.is_file() and os.access(lease, os.R_OK)
-        attempts = max(timeout_s // interval, 1) if lease_usable else 0
 
-        for _ in range(attempts):
+        def _lease_ip() -> str | None:
             ip = self.find_ip_for_mac(lease_file, mac)
             # Belt-and-braces: a lease is accepted only while the domain
             # actually runs.
-            if ip and self.get_domain_state(name) == "running":
+            return ip if ip and self.get_domain_state(name) == "running" else None
+
+        if lease_usable:
+            ip = _poll(_lease_ip, timeout_s, interval)
+            if ip:
                 return ip
-            time.sleep(interval)
 
         if not lease_usable or lease.stat().st_size == 0:
             # Fallbacks, in order: `virsh domifaddr` (retried up to 60 s), then
@@ -1140,14 +1152,16 @@ class Virtualizer:
 
     def _fallback_ip_domifaddr(self, name: str) -> str | None:
         """Best-effort IP via ``virsh domifaddr`` (retried up to 60 s)."""
-        for _ in range(30):
+
+        def _domifaddr_ip() -> str | None:
             listing = _stdout(["virsh", "domifaddr", name])
             for line in listing.splitlines():
                 fields = line.split()
                 if len(fields) >= 3 and re.fullmatch(r"\d+\.\d+\.\d+\.\d+", fields[2]):
                     return fields[2]
-            time.sleep(self.POLL_INTERVAL_S)
-        return None
+            return None
+
+        return _poll(_domifaddr_ip, 30 * self.POLL_INTERVAL_S, self.POLL_INTERVAL_S)
 
     @staticmethod
     def _fallback_ip_arp(mac: str) -> str | None:
@@ -1195,16 +1209,14 @@ class Virtualizer:
             f"{user}@{ip}",
             "exit",
         ]
-        interval = self.POLL_INTERVAL_S
-        for _ in range(max(timeout_s // interval, 1)):
-            if _spawn(probe).returncode == 0:
-                return
-            time.sleep(interval)
-        raise VirtError(
-            f"SSH to {user}@{ip} not reachable yet — check: virsh console {name}",
-            "ssh-timeout",
-            "ssh-verify",
-        )
+        if not _poll(
+            lambda: _spawn(probe).returncode == 0, timeout_s, self.POLL_INTERVAL_S
+        ):
+            raise VirtError(
+                f"SSH to {user}@{ip} not reachable yet — check: virsh console {name}",
+                "ssh-timeout",
+                "ssh-verify",
+            )
 
     # ------------------------------------------------------------------
     # Access
