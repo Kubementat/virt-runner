@@ -329,6 +329,15 @@ class Virtualizer:
 
     def preflight_check(self) -> None:
         """Validate all preconditions. Raises ``VirtError`` on failure."""
+        # 0. x86_64 only (images are x86_64).
+        if self.host_arch() != "x86_64":
+            raise VirtError(
+                f"preflight failed: host arch {self.host_arch()} unsupported "
+                "(x86_64 images only)",
+                "unsupported-arch",
+                "preflight",
+            )
+
         # 1. libvirt reachable
         self.libvirt_reachable()
 
