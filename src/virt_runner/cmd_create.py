@@ -382,7 +382,7 @@ def cmd_create(
     click.echo(f"Name:    {name}   (UUID {run_state['uuid']})")
     click.echo(f"Distro:  {distro} {effective_release}")
     click.echo(f"IP:      {ip}   (also reachable as {name}.default)")
-    click.echo(f"SSH:     ssh {effective_user}@{ip}")
+    click.echo(f"SSH:     virt-runner ssh {name}")
     click.echo(f"Console: virsh console {name}     (Ctrl-] to detach)")
     click.echo(
         f"Teardown: virt-runner destroy {name}   "

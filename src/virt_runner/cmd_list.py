@@ -34,7 +34,7 @@ def _vm_document(vm: VmInfo, display_user: str, identity: str) -> dict[str, Any]
     }
 
 
-def _text_block(vm: VmInfo, display_user: str, identity: str) -> list[str]:
+def _text_block(vm: VmInfo) -> list[str]:
     """The §4.6 block of one VM: headline/Name/IP/SSH/Console/Teardown.
 
     Reads the same :class:`~virt_runner.virtualizer.VmInfo` as
@@ -44,7 +44,7 @@ def _text_block(vm: VmInfo, display_user: str, identity: str) -> list[str]:
         headline = "VM running."
         if vm.ip:
             ip_line = f"IP:      {vm.ip}   (also reachable as {vm.name}.default)"
-            ssh_line = f"SSH:     ssh -i {identity} {display_user}@{vm.ip}"
+            ssh_line = f"SSH:     virt-runner ssh {vm.name}"
         else:
             ip_line = "IP:      (no DHCP lease found yet)"
             ssh_line = "SSH:     (unavailable — no IP yet)"
@@ -122,5 +122,5 @@ def cmd_list(user: str | None, as_json: bool) -> None:
         return
 
     for vm in vms:
-        for line in _text_block(vm, display_user(vm), identity):
+        for line in _text_block(vm):
             click.echo(line)
