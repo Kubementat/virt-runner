@@ -10,6 +10,7 @@ created ``vm``/``image`` sections still describe real resources.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any
 
 import click
@@ -52,6 +53,31 @@ def _validate_user(ctx, param, value):
     return value
 
 
+_GUEST_PATH_RE = re.compile(r"/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*")
+
+
+def _validate_mounts(ctx, param, value):
+    """Parse repeated ``--mount HOST[:GUEST]`` into source/target/tag dicts."""
+    mounts: list[dict[str, str]] = []
+    for i, spec in enumerate(value):
+        host, _, guest = spec.partition(":")
+        source = Path(host).expanduser().resolve()
+        if not source.is_dir():
+            raise click.BadParameter(f"'{host}' is not an existing directory")
+        if "," in str(source):
+            raise click.BadParameter(f"host path '{source}' must not contain ','")
+        target = guest or f"/mnt/{source.name}"
+        if not _GUEST_PATH_RE.fullmatch(target) or {".", ".."} & set(target.split("/")):
+            raise click.BadParameter(
+                f"invalid guest path '{target}': must be absolute, components "
+                "[A-Za-z0-9._-], no '.' or '..'"
+            )
+        if any(m["target"] == target for m in mounts):
+            raise click.BadParameter(f"guest path '{target}' is used twice")
+        mounts.append({"source": str(source), "target": target, "tag": f"mount{i}"})
+    return mounts
+
+
 def _record_metadata(
     v: Virtualizer, name: str, distro: str, user: str, identity: str
 ) -> None:
@@ -87,6 +113,7 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
             "ram_gib": run_state["ram_gib"],
             "vcpu": run_state["vcpu"],
             "disk_gib": run_state["disk_gib"],
+            "mounts": run_state["mounts"],
             "mac": run_state.get("mac"),
             "ip": ip,
             "dns_name": f"{name}.default",
@@ -162,6 +189,15 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
     "[default: ~/.ssh/virt_runner_key.pub]",
 )
 @click.option(
+    "--mount",
+    "mounts",
+    multiple=True,
+    callback=_validate_mounts,
+    metavar="HOST[:GUEST]",
+    help="Share a host directory into the guest (virtiofs, read-write); "
+    "repeatable [default GUEST: /mnt/<basename of HOST>]",
+)
+@click.option(
     "--no-boot",
     is_flag=True,
     default=False,
@@ -183,6 +219,7 @@ def cmd_create(
     image: str | None,
     user: str | None,
     ssh_key: str,
+    mounts: list[dict[str, str]],
     no_boot: bool,
     keep_going: bool,
     as_json: bool,
@@ -223,6 +260,7 @@ def cmd_create(
         "image_url": image_url,
         "booted": False,
         "created": False,
+        "mounts": mounts,
     }
 
     # --------------------------------------------------------------
@@ -233,6 +271,8 @@ def cmd_create(
     try:
         v.preflight_check()
         v.require_domain_absent(name)
+        if mounts:
+            v.require_virtiofsd()
         # Generated on first use when absent, so no manual key setup is needed.
         v.ensure_ssh_key(ssh_key)
 
@@ -253,6 +293,7 @@ def cmd_create(
             user_name=effective_user,
             sudo_group=profile.sudo_group,
             ssh_key=ssh_key,
+            mounts=mounts,
         )
 
         stage = "create"
@@ -268,6 +309,7 @@ def cmd_create(
             cloud_init_meta_data=meta_data,
             os_variant=profile.os_variant,
             no_boot=no_boot,
+            mounts=mounts,
         )
         run_state.update(
             created=True, domain_state=domain_state, uuid=v.get_domain_uuid(name)
@@ -310,5 +352,7 @@ def cmd_create(
         click.echo(f"Distro:  {distro} {effective_release}")
         click.echo(f"IP:      {ip}   (also reachable as {name}.default)")
         click.echo(f"SSH:     virt-runner ssh {name}")
+    for m in mounts:
+        click.echo(f"Mount:   {m['source']} -> {m['target']}")
     for line in output.text_access_lines(name):
         click.echo(line)

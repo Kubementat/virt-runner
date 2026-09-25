@@ -36,7 +36,8 @@ uv run virt-runner destroy myvm
 Requirements: KVM host with `virsh` usable without sudo, active `vm-pool` storage pool and
 `default` network, `virt-install` ≥ 4.1, Python ≥ 3.10 with [`uv`](https://docs.astral.sh/uv/).
 `install-prerequisites.sh` sets all of it up; `--check` audits only. The tool's preflight
-reports any missing piece with an explicit error.
+reports any missing piece with an explicit error. `virtiofsd` (only needed for `--mount`)
+is also installed by `install-prerequisites.sh`.
 
 ## Commands
 
@@ -44,7 +45,8 @@ reports any missing piece with an explicit error.
 uv run virt-runner create NAME   # build + boot; --distro (ubuntu|arch|fedora),
                                  # --ram/--vcpu GiB/ count, --disk GiB,
                                  # --release (default per-distro), --image URL, --user,
-                                 # --ssh-key, --no-boot, --keep-going
+                                 # --ssh-key, --mount HOST[:GUEST] (repeatable; virtiofs share),
+                                 # --no-boot, --keep-going
 uv run virt-runner destroy NAME  # undefine + delete disk (idempotent)
 uv run virt-runner list          # only VMs whose disk lives in vm-pool
 uv run virt-runner ssh NAME      # interactive shell (resolves IP, uses the injected key;
@@ -112,6 +114,30 @@ failure, `2` usage error.
 | `volume-delete-failed` | `virsh vol-delete` failed during teardown |
 | `lease-timeout` | No DHCP lease within the wait window |
 | `ssh-timeout` | The SSH round-trip never succeeded within the wait window |
+| `virtiofsd-missing` | `--mount` given but `/usr/libexec/virtiofsd` is not installed |
+
+## Shared directories
+
+Use `--mount HOST[:GUEST]` to share a host directory into the guest via virtiofs.
+`HOST` is expanded (`~`), resolved to an absolute path, and must be an existing
+directory. `GUEST` defaults to `/mnt/<basename of HOST>` and must be an absolute path
+with components matching `[A-Za-z0-9._-]` (no `.` or `..` component, no spaces,
+and no commas in the host path — virt-install splits sub-options on commas).
+
+The mount is ready as soon as `create` returns (cloud-init `bootcmd` runs before
+sshd). It persists across guest reboots: the first boot also writes a `nofail`
+fstab entry, because the NoCloud seed is only attached for the first boot and
+some images (e.g. Ubuntu 26.04) disable cloud-init entirely on later boots —
+fstab is what keeps the mount alive then. It is read-write; UIDs pass straight through
+(guest user `ubuntu`/`arch`/`fedora` is uid 1000, matching the usual host user).
+Files created by root in the guest are root-owned on the host.
+
+`destroy` never touches the host directory. The virtiofsd daemon exits when the domain
+terminates.
+
+Out of scope: read-only mounts, adding/removing mounts on an existing VM, showing
+mounts in `list`, UID/GID remapping, and older hosts where virtiofsd lives at
+`/usr/lib/qemu/virtiofsd` (Ubuntu 22.04).
 
 ## Integration test
 

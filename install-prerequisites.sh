@@ -14,6 +14,8 @@
 #     * the `default` NAT network defined, autostarted and active
 #     * the `vm-pool` dir storage pool defined, autostarted and active
 #       (all tool-created disks live there)
+#     * virtiofsd, the daemon libvirt starts for `create --mount` host-directory
+#       shares (/usr/libexec/virtiofsd)
 #
 #   Idempotent: safe to re-run — existing packages are upgraded, existing
 #   networks/pools are left alone (only started/autostarted when needed).
@@ -77,7 +79,7 @@ usage() {
   cat <<EOF
 ${BOLD}Usage:${RESET} $0 [OPTIONS]
 
-Installs the KVM + libvirt + virt-install toolchain virt-runner drives and
+Installs the KVM + libvirt + virt-install + virtiofsd toolchain virt-runner drives and
 brings the host to its expected state: qemu:///system reachable without sudo,
 active '${VIRT_NET_NAME}' network, active '${VIRT_POOL_NAME}' storage pool.
 Uses sudo internally; re-runnable.
@@ -144,6 +146,9 @@ declare -a BASE_PACKAGES=(
   bridge-utils
   # virt-install (drives --import + --cloud-init)
   virtinst
+  # virtiofs daemon: libvirt starts it per shared dir for `create --mount`
+  # (installs /usr/libexec/virtiofsd = Virtualizer.VIRTIOFSD)
+  virtiofsd
   # UEFI firmware: unused by the BIOS-only Ubuntu path, required for aarch64 /
   # --boot uefi guests (generalize-vm-creation feature spec).
   ovmf
@@ -511,6 +516,14 @@ check_cmd virsh "virsh --version"
 check_cmd virt-install "virt-install --version"
 check_cmd curl "curl --version"
 check_cmd jq "jq --version"
+
+# virtiofsd lives in libexec, not on PATH; must match Virtualizer.VIRTIOFSD.
+VIRTIOFSD=/usr/libexec/virtiofsd
+if [[ -x "${VIRTIOFSD}" ]]; then
+  success "virtiofsd: $("${VIRTIOFSD}" --version 2>&1 | head -1)"
+else
+  warn "${VIRTIOFSD} not found — 'virt-runner create --mount' will fail (package: virtiofsd)"
+fi
 
 # kvm-ok is the authoritative check: it covers both loaded and built-in kvm,
 # so no separate `lsmod` probe (a built-in kvm shows no lsmod row and would

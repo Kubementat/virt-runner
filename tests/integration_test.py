@@ -3,15 +3,19 @@
 Run with: uv run tests/integration_test.py
 
 Flow: create 2 Ubuntu VMs + 1 Arch VM + 1 Fedora VM -> list -> ssh hello world
-in each -> ssh <name> session in each -> destroy all -> list (expect 0).
++ shared-dir read/write in each -> ssh <name> session in each -> destroy all
+-> list (expect 0).
 """
 
 from __future__ import annotations
 
 import json
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 from virt_runner.virtualizer import Virtualizer
 
@@ -50,9 +54,8 @@ def virt_runner(*args: str, allow_fail: bool = False) -> tuple[dict, int]:
     return doc, proc.returncode
 
 
-def ssh_hello(world: str, ssh_command: str) -> None:
-    # Run exactly the ssh_command virt-runner reports, plus non-interactive
-    # options, to prove the printed line is copy-paste ready.
+def ssh_run(ssh_command: str, remote: str) -> str:
+    """Run *remote* via the reported ssh_command (non-interactive); return stdout."""
     parts = shlex.split(ssh_command)
     cmd = (
         parts[:1]
@@ -67,11 +70,17 @@ def ssh_hello(world: str, ssh_command: str) -> None:
             "ConnectTimeout=10",
         ]
         + parts[1:]
-        + [f"echo {world}"]
+        + [remote]
     )
     proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
     assert proc.returncode == 0, f"ssh failed ({' '.join(cmd)}): {proc.stderr}"
-    assert world in proc.stdout, f"expected {world!r} in stdout, got {proc.stdout!r}"
+    return proc.stdout
+
+
+def ssh_hello(world: str, ssh_command: str) -> None:
+    # Run exactly the ssh_command virt-runner reports, plus non-interactive
+    # options, to prove the printed line is copy-paste ready.
+    assert world in ssh_run(ssh_command, f"echo {world}")
 
 
 def check(condition: bool, message: str) -> None:
@@ -81,6 +90,10 @@ def check(condition: bool, message: str) -> None:
 
 
 def main() -> None:
+    # Create a shared directory for the mount tests.
+    share = Path(tempfile.mkdtemp(prefix="virt-runner-it-share-"))
+    (share / "marker").write_text("from-host\n")
+
     # Best-effort cleanup of leftovers from a previous interrupted run.
     # Still --json: even the "vm-not-defined" error path must carry an
     # envelope on stdout.
@@ -108,12 +121,32 @@ def main() -> None:
         # 1. Create two VMs.
         for name in NAMES:
             doc, _ = virt_runner(
-                "create", "--ram", "1", "--vcpu", "1", "--disk", "8", name
+                "create",
+                "--ram",
+                "1",
+                "--vcpu",
+                "1",
+                "--disk",
+                "8",
+                "--mount",
+                f"{share}:/mnt/share",
+                name,
             )
             check(doc["status"] == "success", f"create {name} succeeded")
             check(doc["booted"], f"{name} booted")
             check(doc["vm"]["ip"] is not None, f"{name} has an IP")
             check(doc["image"]["verified"], f"{name} image verified")
+            check(
+                doc["vm"]["mounts"]
+                == [
+                    {
+                        "source": str(share.resolve()),
+                        "target": "/mnt/share",
+                        "tag": "mount0",
+                    }
+                ],
+                f"{name} reports its mount",
+            )
 
         # 1a. Negative: creating the existing NAMES[0] again fails fast while
         # it still exists (vm-already-defined, exit 1).
@@ -149,6 +182,8 @@ def main() -> None:
             "1",
             "--disk",
             "8",
+            "--mount",
+            f"{share}:/mnt/share",
             ARCH_NAME,
         )
         check(doc["status"] == "success", f"create {ARCH_NAME} succeeded")
@@ -170,6 +205,8 @@ def main() -> None:
             "1",
             "--disk",
             "8",
+            "--mount",
+            f"{share}:/mnt/share",
             FEDORA_NAME,
         )
         check(doc["status"] == "success", f"create {FEDORA_NAME} succeeded")
@@ -218,6 +255,28 @@ def main() -> None:
             ssh_hello(world, vm["ssh_command"])
             check(True, f"hello world ran in {vm['name']} via {vm['ssh_command']}")
 
+        # 3b. Mount read/write check for each VM.
+        for vm in doc["vms"]:
+            if vm["name"] not in ALL:
+                continue
+            out = ssh_run(
+                vm["ssh_command"],
+                f"cat /mnt/share/marker && touch /mnt/share/from-{vm['name']}",
+            )
+            check("from-host" in out, f"{vm['name']} reads the host share")
+            check(
+                (share / f"from-{vm['name']}").exists(),
+                f"{vm['name']} writes to the host share",
+            )
+            # fstab fallback: the NoCloud seed CDROM is first-boot-only, so the
+            # bootcmd also records a nofail fstab entry to keep the mount across
+            # later reboots when cloud-init no longer runs.
+            fstab = ssh_run(vm["ssh_command"], "grep virtiofs /etc/fstab || true")
+            check(
+                "nofail" in fstab and "/mnt/share" in fstab,
+                f"{vm['name']} recorded the virtiofs fstab entry",
+            )
+
         # 3b. `ssh <name>` opens a real session in the VM — stdin is /dev/null,
         # so the remote shell sees EOF and exits 0; a non-zero exit fails the run.
         # The per-VM user (ubuntu/arch) comes from the domain metadata, no --user.
@@ -239,6 +298,7 @@ def main() -> None:
         # A failed run must not leak VMs (check() exits, finally still runs).
         for name in ALL:
             virt_runner("destroy", name, allow_fail=True)
+        shutil.rmtree(share, ignore_errors=True)
 
 
 if __name__ == "__main__":
