@@ -1,8 +1,4 @@
-"""Cloud-image download + verification (moved out of :mod:`virt_runner.virtualizer`).
-
-Everything that fetches a guest image or its checksum file lives here;
-``cmd_create`` calls :func:`fetch_and_verify_image` directly.
-"""
+"""Cloud-image download + verification (moved out of :mod:`virt_runner.virtualizer`)."""
 
 from __future__ import annotations
 
