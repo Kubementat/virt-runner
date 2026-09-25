@@ -511,7 +511,11 @@ class Virtualizer:
             sums_url = _same_dir(image_url, "SHA256SUMS")
             scheme = image_url.split("://")[0] if "://" in image_url else ""
             verifiable = scheme in ("file", "http", "https")
-            cache_dir = cache_dir / "custom"
+            cache_dir = (
+                cache_dir
+                / "custom"
+                / hashlib.sha256(image_url.encode()).hexdigest()[:12]
+            )
 
         # Resolve any glob in the image URL (Fedora uses rotating filenames).
         image_url = _resolve_glob(image_url, cache_dir)
