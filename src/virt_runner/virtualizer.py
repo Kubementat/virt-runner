@@ -947,7 +947,6 @@ class Virtualizer:
         mac: str,
         cloud_init_user_data: str,
         cloud_init_meta_data: str,
-        ssh_key: str,
         os_variant: str,
         no_boot: bool,
     ) -> str:
@@ -977,15 +976,16 @@ class Virtualizer:
             "--os-variant",
             os_variant,
             "--import",
-            "--console",
-            "none",
+            # --noautoconsole keeps virt-install from hanging on the console
+            # while still creating the serial console device that the
+            # `virsh console` recommendation points at.
+            "--noautoconsole",
             # PI-9: `disable=on` is mandatory; a bare `--cloud-init` makes
             # virt-install generate a root password.
             "--cloud-init",
             (
                 f"user-data={cloud_init_user_data},"
                 f"meta-data={cloud_init_meta_data},"
-                f"clouduser-ssh-key={ssh_key},"
                 "disable=on"
             ),
             # PI-11: autostart always.

@@ -265,7 +265,6 @@ def cmd_create(
             mac=mac,
             cloud_init_user_data=user_data,
             cloud_init_meta_data=meta_data,
-            ssh_key=ssh_key,
             os_variant=profile.os_variant,
             no_boot=no_boot,
         )
