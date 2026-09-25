@@ -1296,9 +1296,14 @@ def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
         # 1. Destroy if running, then undefine. Ordering is mandatory:
         #    vol-delete fails on a still-attached disk.
         was_running = self.get_domain_state(name) == "running"
-        if was_running:
-            _run(["virsh", "--quiet", "destroy", name])
-        _run(["virsh", "--quiet", "undefine", name])
+        try:
+            if was_running:
+                _run(["virsh", "--quiet", "destroy", name])
+            _run(["virsh", "--quiet", "undefine", name])
+        except RuntimeError as exc:
+            raise VirtError(
+                f"failed to destroy/undefine VM '{name}'", "vm-destroy-failed"
+            ) from exc
 
         # 2. Delete volume. An already-absent volume is a warning, not a
         #    failure (D7): the teardown's contract is "nothing left behind".

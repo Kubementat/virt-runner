@@ -16,7 +16,13 @@ def cmd_destroy(name: str, as_json: bool) -> None:
     output.set_json_mode(as_json)
     v = Virtualizer()
 
-    # Preflight: must be a defined domain.
+    # Preflight: libvirt must be reachable.
+    try:
+        v.libvirt_reachable()
+    except RuntimeError as exc:
+        output.fail_with("destroy", exc, "libvirt-unreachable", fields={"name": name})
+
+    # Must be a defined domain.
     if not v.domain_exists(name):
         # Exact text-mode wording (spec §4.5): no "vm-destroy:" prefix.
         output.fail(
