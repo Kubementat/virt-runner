@@ -216,6 +216,37 @@ def ip_status_for(state: str, mac: str, ip: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Cloud-init renderers (pure functions for unit testing)
+# ---------------------------------------------------------------------------
+
+
+def render_user_data(user_name: str, group: str, key_line: str) -> str:
+    """Generate cloud-init user-data YAML with JSON-quoted scalars."""
+    return (
+        "#cloud-config\n"
+        "manage_etc_hosts: true\n"
+        "users:\n"
+        f"  - name: {json.dumps(user_name)}\n"
+        f"    groups: [{group}]\n"
+        '    sudo: ["ALL=(ALL) NOPASSWD:ALL"]\n'
+        "    ssh_authorized_keys:\n"
+        f"      - {json.dumps(key_line)}\n"
+        "package_update: false\n"
+    )
+
+
+def render_meta_data(id_val: str, name: str) -> str:
+    """Generate cloud-init meta-data YAML."""
+    return (
+        f"id: {id_val}\n"
+        f"local-hostname: {name}\n"
+        "hostnames:\n"
+        f"  local: {name}\n"
+        f"  host: {name}\n"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Virtualizer
 # ---------------------------------------------------------------------------
 
@@ -702,15 +733,14 @@ def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
         user_name: str,
         sudo_group: str,
         ssh_key: str,
-    ) -> tuple[str, str, str]:
+    ) -> tuple[str, str]:
         """Generate cloud-init user-data and meta-data files.
 
         Returns:
-            Tuple of ``(temp_dir, user_data_path, meta_data_path)``.
+            Tuple of ``(user_data_path, meta_data_path)``.
             The temp dir is cleaned up on process exit via ``atexit``.
         """
         tmp_dir = tempfile.mkdtemp(prefix="virt-runner-cloud-init-")
-        os.chmod(tmp_dir, 0o700)
 
         # Fresh lowercase UUID (meta-data `id:`).
         new_id = str(uuid.uuid4())
@@ -722,33 +752,12 @@ def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
                 f"ssh key not found: {ssh_key}", "ssh-key-missing", "cloud-init"
             ) from exc
 
-        # meta-data. PI-5: NoCloud applies `local-hostname:`; the `hostnames:`
-        # dict alone leaves the image default hostname. Both are emitted.
-        meta_data = (
-            f"id: {new_id}\n"
-            f"local-hostname: {name}\n"
-            f"hostnames:\n"
-            f"  local: {name}\n"
-            f"  host: {name}\n"
-        )
-
-        # user-data
-        user_data = (
-            "#cloud-config\n"
-            "manage_etc_hosts: true\n"
-            "users:\n"
-            f"  - name: {user_name}\n"
-            f"    groups: [{sudo_group}]\n"
-            '    sudo: ["ALL=(ALL) NOPASSWD:ALL"]\n'
-            "    ssh_authorized_keys:\n"
-            f"      - {ssh_key_line}\n"
-            "package_update: false\n"
-        )
+        # meta-data and user-data via pure renderers.
+        meta_data = render_meta_data(new_id, name)
+        user_data = render_user_data(user_name, sudo_group, ssh_key_line)
 
         (Path(tmp_dir) / "meta-data").write_text(meta_data)
         (Path(tmp_dir) / "user-data").write_text(user_data)
-        os.chmod(Path(tmp_dir) / "meta-data", 0o600)
-        os.chmod(Path(tmp_dir) / "user-data", 0o600)
 
         # Test-only dump hook.
         dump_dir = os.environ.get("VM_CREATE_CLOUD_INIT_DUMP")
@@ -766,7 +775,6 @@ def _resolve_glob(url: str, cache_dir: Path | None = None) -> str:
             f"cloud-init files generated: {tmp_dir} (meta-data, user-data; id={new_id})"
         )
         return (
-            tmp_dir,
             str(Path(tmp_dir) / "user-data"),
             str(Path(tmp_dir) / "meta-data"),
         )

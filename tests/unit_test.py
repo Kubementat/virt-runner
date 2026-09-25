@@ -1,8 +1,9 @@
 """Pure-logic checks (no libvirt, no network). Run: uv run tests/unit_test.py"""
 
 from virt_runner import virtualizer as vz
+from virt_runner.cmd_create import _validate_user
 from virt_runner.profiles import PROFILES, _same_dir
-from virt_runner.virtualizer import _newest_match
+from virt_runner.virtualizer import _newest_match, render_meta_data, render_user_data
 
 
 def main() -> None:
@@ -69,6 +70,28 @@ def main() -> None:
 
     # _newest_match — no match returns None.
     assert _newest_match(["foo.txt"], "*.qcow2") is None
+
+    # render_user_data — key line appears JSON-quoted, output starts with #cloud-config.
+    user_data = render_user_data("testuser", "sudo", "ssh-ed25519 # comment: key")
+    assert user_data.startswith("#cloud-config")
+    assert '"ssh-ed25519 # comment: key"' in user_data
+
+    # render_meta_data — produces valid YAML.
+    meta = render_meta_data("abc-123", "myvm")
+    assert "id: abc-123" in meta
+    assert "local-hostname: myvm" in meta
+
+    # _validate_user — good value passes through.
+    assert _validate_user(None, None, "ubuntu") == "ubuntu"
+
+    # _validate_user — bad value raises BadParameter.
+    import click
+
+    try:
+        _validate_user(None, None, "Bad User")
+        raise AssertionError("expected BadParameter")
+    except click.BadParameter:
+        pass
 
     print("unit checks ok")
 

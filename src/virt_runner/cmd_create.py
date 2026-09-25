@@ -33,6 +33,16 @@ def _validate_name(ctx, param, value):
     return value
 
 
+def _validate_user(ctx, param, value):
+    """Validate user name matches [a-z_][a-z0-9_-]{0,31}."""
+    if value is not None and not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", value):
+        raise click.BadParameter(
+            f"invalid user name '{value}': must match "
+            r"[a-z_][a-z0-9_-]{0,31}"
+        )
+    return value
+
+
 def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
     """Render the sections completed so far, in the spec §5.3.1 order.
 
@@ -120,6 +130,7 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
 @click.option(
     "--user",
     default=None,
+    callback=_validate_user,
     help="Cloud user name [default: per-distro: ubuntu/arch/fedora]",
 )
 @click.option(
