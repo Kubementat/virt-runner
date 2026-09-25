@@ -143,7 +143,7 @@ Layout: `cli → cmd_* → virtualizer → core (output, errors)`. Only
 JSON render from one run-state dict. Exit codes: `0` success, `1` runtime, `2` usage — with
 stable `error.code` values (full table: [JSON output](#json-output)).
 
-Gotchas that bite when touching the create stage (full list: spec §13, `docs/lessons-learned/`):
+Gotchas that bite when touching the create stage (full list: `docs/lessons-learned/`):
 `vol-upload` implicitly resizes the volume (a `vol-resize` after it is mandatory), `--ram`
 is **MiB** in virt-install, and `disable=on` on `--cloud-init` is mandatory.
 

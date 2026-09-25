@@ -25,9 +25,9 @@ class ImageFetch:
     """Outcome of :func:`fetch_and_verify_image`.
 
     ``verification``/``verified`` say how the returned file earned trust. A
-    cache hit reports the verification that populated the cache — the cache is
-    only written by a verified download — while ``"skipped"`` means no sums
-    were derivable (warning printed, ``verified`` false).
+    cache hit is ``"sha256-sums"`` only when a ``.verified`` marker proves the
+    file was verified before; the cache can also hold unverified images (no
+    derivable sums), which report ``"skipped"``.
     """
 
     path: str
@@ -210,9 +210,9 @@ def fetch_and_verify_image(
                 f"vm-create: warning: reusing cached image (no download): {img_path}"
             )
         output.progress(f"image ready: {img_path}")
-        # A cached file is a previously verified artifact (only a verified
-        # download writes it), so the verification mode is reported rather
-        # than re-run here (PI-14).
+        # The cache can hold unverified images (no derivable sums); the
+        # .verified marker is the proof, so it is reported rather than
+        # re-run here (PI-14).
         marker = img_path.with_name(img_path.name + ".verified")
         verification = "sha256-sums" if marker.exists() else "skipped"
         return ImageFetch(
