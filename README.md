@@ -175,6 +175,14 @@ is **MiB** in virt-install, and `disable=on` on `--cloud-init` is mandatory.
 
 Read next: [`docs/e2e-acceptance.md`](docs/e2e-acceptance.md).
 
+## Agent skill
+
+[`skills/virt-runner-cli/`](skills/virt-runner-cli/SKILL.md) is an agent skill that teaches
+coding agents to use virt-runner well: every flag, the `--json` contract and error codes, common
+workflows, and safety rules (for example, only destroy VMs you created). To install it, link it
+into your skills directory with `ln -s "$PWD/skills/virt-runner-cli" ~/.claude/skills/` (or into a
+project's `.claude/skills/`).
+
 ## Troubleshooting
 
 | Symptom | Fix |
