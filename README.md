@@ -97,7 +97,7 @@ failure, `2` usage error.
 | `pool-not-found` | Storage pool `vm-pool` is not defined |
 | `pool-path-unknown` | The pool's directory path could not be determined |
 | `network-not-active` | The `default` network is not active |
-| `unsupported-arch` | Host is not x86_64 (images are x86_64 only) |
+| `unsupported-arch` | Host arch is not x86_64 or aarch64 |
 | `vm-already-defined` | A domain with the given name already exists |
 | `vm-not-defined` | No such domain (destroy/ssh of a missing VM) |
 | `vm-not-running` | The domain exists but is not running |
@@ -106,6 +106,7 @@ failure, `2` usage error.
 | `image-download-failed` | The image (or its directory listing) could not be fetched |
 | `image-verification-failed` | SHA256 mismatch or missing checksum entry |
 | `image-no-cache` | `--keep-going` with a failed download/verify and no cached image |
+| `image-arch-unavailable` | The distro profile has no image for the host arch (e.g. `--distro arch` on aarch64 — arch-boxes is x86_64-only) |
 | `cloud-init-failed` | The cloud-init user/meta-data files could not be generated |
 | `volume-create-failed` | `virsh vol-create-as` failed |
 | `volume-import-failed` | `virsh vol-upload` failed |
@@ -128,9 +129,9 @@ and no commas in the host path — virt-install splits sub-options on commas).
 
 The mount is ready as soon as `create` returns (cloud-init `bootcmd` runs before
 sshd). It persists across guest reboots: the first boot also writes a `nofail`
-fstab entry, because the NoCloud seed is only attached for the first boot and
-some images (e.g. Ubuntu 26.04) disable cloud-init entirely on later boots —
-fstab is what keeps the mount alive then. It is read-write; UIDs pass straight through
+fstab entry and disables cloud-init for later boots (the NoCloud seed stays
+attached, so without that flag cloud-init would re-run on every boot) —
+fstab is what re-mounts the share then. It is read-write; UIDs pass straight through
 (guest user `ubuntu`/`arch`/`fedora` is uid 1000, matching the usual host user).
 Files created by root in the guest are root-owned on the host.
 
@@ -164,7 +165,8 @@ uv run virt-runner create dev --script setup.sh --script configure.py
 ## Integration test
 
 `tests/integration_test.py` is an end-to-end suite against the real host: creates
-four VMs (two Ubuntu, one Arch, one Fedora), lists them, runs a hello world via SSH in each (using
+four VMs (two Ubuntu, one Arch, one Fedora; the Arch leg is skipped on aarch64
+hosts — arch-boxes ships x86_64-only images), lists them, runs a hello world via SSH in each (using
 the reported `ssh_command`), opens a `ssh <name>` session into each, destroys them all,
 and verifies they're gone. Every call goes through `--json`, so it also enforces that
 stdout stays valid JSON at every step.
@@ -193,7 +195,12 @@ stable `error.code` values (full table: [JSON output](#json-output)).
 
 Gotchas that bite when touching the create stage (full list: `docs/lessons-learned/`):
 `vol-upload` implicitly resizes the volume (a `vol-resize` after it is mandatory), `--ram`
-is **MiB** in virt-install, and `disable=on` on `--cloud-init` is mandatory.
+is **MiB** in virt-install, the NoCloud seed ISO must survive the guest's first boot
+(virt-install's own `--cloud-init` ISO does not — its exit cleanup deletes it, which
+loops aarch64 UEFI in `Reset System`), and aarch64 VMs must be created with Secure Boot
+disabled (Fedora's aarch64 image ships an unsigned GRUB — the Secure Boot firmware
+build rejects it with a silent `Security Violation` dialog: no kernel, no lease, an
+empty `virsh console`).
 
 Read next: [`docs/e2e-acceptance.md`](docs/e2e-acceptance.md).
 

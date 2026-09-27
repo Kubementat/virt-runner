@@ -139,6 +139,7 @@ def _sha256_of(path: Path) -> str:
 
 def fetch_and_verify_image(
     profile: DistroProfile,
+    arch: str,
     release: str,
     release_given: bool,
     image_url: str,
@@ -149,6 +150,8 @@ def fetch_and_verify_image(
 
     Args:
         profile: the distro profile (image URL, sums URL, cache dir).
+        arch: the arch the image URL was resolved for (profiles are
+            per-arch; the sums URL is derived per arch as well).
         release: release codename (e.g. ``resolute``).
         release_given: whether ``--release`` was explicitly passed.
         image_url: the effective image URL (the release pattern unless
@@ -199,10 +202,12 @@ def fetch_and_verify_image(
                 "image",
             )
         last: VirtError | None = None
+        unverified: ImageFetch | None = None
         for candidate in candidates:
             try:
-                return fetch_and_verify_image(
+                result = fetch_and_verify_image(
                     profile,
+                    arch,
                     release,
                     release_given,
                     candidate,
@@ -213,6 +218,23 @@ def fetch_and_verify_image(
                 if e.code != "image-download-failed":
                     raise
                 last = e
+                continue
+            if result.verified:
+                return result
+            # The image downloaded but its checksums did not (yet): a
+            # partially synced mirror during a point release. Prefer a
+            # fully synced, verifiable build over an unverified image;
+            # D1's skip stays the last resort when none verifies.
+            if unverified is None:
+                # Keep the NEWEST unverified as the last-resort fallback
+                # (the old behavior when nothing verifies).
+                unverified = result
+            output.warn(
+                f"virt-runner: warning: no verifiable checksums for "
+                f"{result.path} (mirror still syncing?); trying older build"
+            )
+        if unverified is not None:
+            return unverified
         assert last is not None
         raise last
 
@@ -221,7 +243,7 @@ def fetch_and_verify_image(
 
     # Compute sums_url from the resolved image_url.
     if release_given or not image_given:
-        sums_url = profile.sums_url(image_url)
+        sums_url = profile.sums_url(arch, image_url)
     else:
         sums_url = _same_dir(image_url, "SHA256SUMS")
 

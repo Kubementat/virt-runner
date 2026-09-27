@@ -257,11 +257,6 @@ def cmd_create(
             "for other builds pass the direct URL via --image"
         )
 
-    if release_given or not image_given:
-        image_url = profile.image_url(effective_release)
-    else:
-        image_url = image
-
     # Everything the result document may need, filled in as stages complete.
     effective_user = user if user is not None else profile.suggested_user
     run_state: dict[str, Any] = {
@@ -274,7 +269,7 @@ def cmd_create(
         "disk_gib": disk,
         "user": effective_user,
         "ssh_identity": v.private_key_path(ssh_key),
-        "image_url": image_url,
+        "image_url": None,
         "booted": False,
         "created": False,
         "mounts": mounts,
@@ -287,6 +282,13 @@ def cmd_create(
     stage = "preflight"
     ip = None
     try:
+        # URL resolution first: a distro without an image for the host arch
+        # (arch on aarch64) fails here, before any network activity.
+        if release_given or not image_given:
+            run_state["image_url"] = profile.image_url(v.host_arch(), effective_release)
+        else:
+            run_state["image_url"] = image
+
         v.preflight_check()
         v.require_domain_absent(name)
         if mounts:
@@ -297,9 +299,10 @@ def cmd_create(
         stage = "image"
         image_fetch: ImageFetch = fetch_and_verify_image(
             profile=profile,
+            arch=v.host_arch(),
             release=effective_release,
             release_given=release_given,
-            image_url=image_url,
+            image_url=run_state["image_url"],
             image_given=image_given,
             keep_going=keep_going,
         )
@@ -313,6 +316,10 @@ def cmd_create(
             ssh_key=ssh_key,
             mounts=mounts,
         )
+        # The seed ISO must survive the guest's first boot (virt-install's
+        # own --cloud-init ISO does not — see create_vm), so virt-runner
+        # builds and owns it as a pool volume (destroy removes it).
+        cloud_init_iso = v.build_cloud_init_iso(name, user_data, meta_data)
 
         stage = "create"
         volume = v.provision_volume(name, disk, image_fetch.path)
@@ -323,8 +330,7 @@ def cmd_create(
             vcpus=vcpu,
             volume=volume,
             mac=mac,
-            cloud_init_user_data=user_data,
-            cloud_init_meta_data=meta_data,
+            cloud_init_iso=cloud_init_iso,
             os_variant=profile.os_variant,
             no_boot=no_boot,
             mounts=mounts,

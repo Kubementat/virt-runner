@@ -209,6 +209,19 @@ def ip_status_for(state: str, mac: str, ip: str) -> str:
     return IP_STATUS_LEASE if ip else IP_STATUS_RUNNING_NO_LEASE
 
 
+def _pick_no_secboot_loader(paths: list[str]) -> str | None:
+    """The UEFI firmware path with Secure Boot disabled, or ``None``.
+
+    Only an explicit ``no-secboot`` marker is trusted: the first/default
+    entry may be the Secure Boot build, whose enrolled keys reject unsigned
+    guests (see :meth:`Virtualizer.uefi_no_secboot_loader`).
+    """
+    for path in paths:
+        if "no-secboot" in path:
+            return path
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Cloud-init renderers (pure functions for unit testing)
 # ---------------------------------------------------------------------------
@@ -221,10 +234,9 @@ def render_user_data(
 
     Each mount becomes an idempotent ``bootcmd`` line. bootcmd runs on the
     first boot, before sshd, so the share is mounted by the time SSH answers.
-    It also records an fstab entry: the NoCloud seed is only attached for the
-    first boot (virt-install), and images whose cloud-init disables itself
-    when no datasource is present (e.g. Ubuntu 26.04) never re-run bootcmd,
-    so fstab is what keeps the mount across later reboots.
+    It also records an fstab entry: the first boot disables cloud-init for
+    all later boots (``runcmd`` below), so bootcmd never runs again and
+    fstab is what keeps the mount across later reboots.
     """
     bootcmd = "".join(
         "  - "
@@ -246,7 +258,12 @@ def render_user_data(
         '    sudo: ["ALL=(ALL) NOPASSWD:ALL"]\n'
         "    ssh_authorized_keys:\n"
         f"      - {json.dumps(key_line)}\n"
-        "package_update: false\n" + (f"bootcmd:\n{bootcmd}" if mounts else "")
+        "package_update: false\n"
+        # The NoCloud seed CDROM stays attached after the first boot, so the
+        # first boot disables cloud-init for all later boots (the same effect
+        # virt-install's `--cloud-init disable=on` used to give).
+        'runcmd:\n  - echo "Disabled by virt-runner" > /etc/cloud/cloud-init.disabled\n'
+        + (f"bootcmd:\n{bootcmd}" if mounts else "")
     )
 
 
@@ -370,11 +387,11 @@ class Virtualizer:
 
     def preflight_check(self) -> None:
         """Validate all preconditions. Raises ``VirtError`` on failure."""
-        # 0. x86_64 only (images are x86_64).
-        if self.host_arch() != "x86_64":
+        # 0. x86_64 / aarch64 only (the profiles carry images for those archs).
+        if self.host_arch() not in ("x86_64", "aarch64"):
             raise VirtError(
                 f"preflight failed: host arch {self.host_arch()} unsupported "
-                "(x86_64 images only)",
+                "(x86_64 and aarch64 hosts only)",
                 "unsupported-arch",
                 "preflight",
             )
@@ -508,6 +525,106 @@ class Virtualizer:
         """Normalised host architecture (``uname -m`` aliases folded)."""
         machine = platform.machine()
         return {"amd64": "x86_64", "arm64": "aarch64"}.get(machine, machine)
+
+    # ------------------------------------------------------------------
+    # Cloud-init seed ISO
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def cloud_init_iso_volume(name: str) -> str:
+        """The NoCloud seed ISO volume of *name* in the storage pool.
+
+        The ISO must outlive the ``create`` process (the guest reads it on
+        first boot) and be readable by the hypervisor user — a pool volume
+        satisfies both (the daemon owns the pool's permissions; a file under
+        the user's home dir is not traversable by ``libvirt-qemu``).
+        """
+        return f"{name}-cloudinit.iso"
+
+    def delete_cloud_init_iso_quiet(self, name: str) -> None:
+        """Best-effort seed volume removal; an absent volume is fine."""
+        _quiet(
+            [
+                "virsh",
+                "--quiet",
+                "vol-delete",
+                self.cloud_init_iso_volume(name),
+                self.POOL,
+            ]
+        )
+
+    def build_cloud_init_iso(self, name: str, user_data: str, meta_data: str) -> str:
+        """Build the NoCloud seed ISO (volume label ``cidata``) for *name*.
+
+        Both seed files sit at the ISO root, as cloud-init's NoCloud data
+        source expects. The ISO is uploaded to the storage pool as a
+        volume; returns the volume name (attach as ``vol=pool/<vol>``).
+
+        Raises:
+            VirtError: ``cloud-init-failed`` when ``xorrisofs`` or the
+                volume upload fails — no volume or partial file is left
+                behind.
+        """
+        if not shutil.which("xorrisofs"):
+            raise VirtError(
+                f"failed to build NoCloud seed ISO for '{name}': xorrisofs "
+                "not found — install the 'xorriso' package",
+                "cloud-init-failed",
+                "cloud-init",
+            )
+        volume = self.cloud_init_iso_volume(name)
+        fd, tmp = tempfile.mkstemp(prefix="virt-runner-cidata-", suffix=".iso")
+        os.close(fd)
+        try:
+            # user-data and meta-data share the temp dir — xorrisofs takes the dir.
+            src_dir = Path(user_data).parent
+            result = _spawn(
+                [
+                    "xorrisofs",
+                    "-o",
+                    tmp,
+                    "-J",
+                    "-input-charset",
+                    "utf8",
+                    "-rational-rock",
+                    "-V",
+                    "cidata",
+                    str(src_dir),
+                ]
+            )
+            if result.returncode != 0 or not _non_empty_file(Path(tmp)):
+                raise VirtError(
+                    f"failed to build NoCloud seed ISO for '{name}': "
+                    f"{(result.stderr or result.stdout).strip()}",
+                    "cloud-init-failed",
+                    "cloud-init",
+                )
+            try:
+                _run(
+                    [
+                        "virsh",
+                        "vol-create-as",
+                        self.POOL,
+                        volume,
+                        "--capacity",
+                        str(Path(tmp).stat().st_size),
+                        "--format",
+                        "raw",
+                    ]
+                )
+                _run(["virsh", "vol-upload", "--pool", self.POOL, volume, tmp])
+            except RuntimeError as exc:
+                self.delete_cloud_init_iso_quiet(name)
+                raise VirtError(
+                    f"failed to upload NoCloud seed ISO for '{name}' to pool "
+                    f"'{self.POOL}'",
+                    "cloud-init-failed",
+                    "cloud-init",
+                ) from exc
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+        output.progress(f"NoCloud seed ISO ready: {self.POOL}/{volume}")
+        return volume
 
     # ------------------------------------------------------------------
     # Cloud-init
@@ -670,6 +787,22 @@ class Virtualizer:
         tail = os.urandom(3).hex()
         return f"52:54:00:{tail[0:2]}:{tail[2:4]}:{tail[4:6]}"
 
+    def uefi_no_secboot_loader(self) -> str | None:
+        """UEFI firmware without Secure Boot for aarch64 domains, or ``None``.
+
+        aarch64 domains always boot UEFI, and libvirt's default firmware on
+        some hosts has Secure Boot enabled (enrolled Microsoft keys). That
+        rejects guests with unsigned bootloaders — e.g. Fedora's aarch64
+        cloud image — with a firmware ``Security Violation`` dialog: the VM
+        never reaches the kernel and ``create`` times out in wait-ip with no
+        console output (the dialog predates any console attach). Booting the
+        same image from the ``no-secboot`` firmware works. ``None`` (no
+        override) when the host offers no such firmware — e.g. hosts whose
+        only UEFI build is already non-secure.
+        """
+        listing = _stdout(["virsh", "domcapabilities", "--arch", self.host_arch()])
+        return _pick_no_secboot_loader(re.findall(r"<value>(/[^<]+)</value>", listing))
+
     def create_vm(
         self,
         name: str,
@@ -677,13 +810,18 @@ class Virtualizer:
         vcpus: int,
         volume: str,
         mac: str,
-        cloud_init_user_data: str,
-        cloud_init_meta_data: str,
+        cloud_init_iso: str,
         os_variant: str,
         no_boot: bool,
         mounts: list[dict[str, str]] = (),
     ) -> str:
         """Create a VM via virt-install.
+
+        *cloud_init_iso* is the NoCloud seed ISO built by
+        :meth:`build_cloud_init_iso`, attached as a plain CDROM — NOT
+        virt-install's own ``--cloud-init`` flag, whose ISO virt-install's
+        exit cleanup deletes while the guest is still booting (fatal on
+        aarch64; see ``docs/lessons-learned/008``).
 
         If ``no_boot`` is True, stops the domain immediately (D5).
 
@@ -713,17 +851,27 @@ class Virtualizer:
             # while still creating the serial console device that the
             # `virsh console` recommendation points at.
             "--noautoconsole",
-            # PI-9: `disable=on` is mandatory; a bare `--cloud-init` makes
-            # virt-install generate a root password.
-            "--cloud-init",
-            (
-                f"user-data={cloud_init_user_data},"
-                f"meta-data={cloud_init_meta_data},"
-                "disable=on"
-            ),
+            # NoCloud seed as a plain --disk CDROM from the pool volume
+            # (see the docstring): virt-runner owns the volume and its
+            # lifetime, virt-install does not delete it on exit. cloud-init
+            # stays enabled only for the first boot via the runcmd in
+            # render_user_data (the old `--cloud-init disable=on`
+            # equivalent; a bare --cloud-init would also generate a root
+            # password, PI-9).
+            "--disk",
+            f"vol={self.POOL}/{cloud_init_iso},device=cdrom",
             # PI-11: autostart always.
             "--autostart",
         ]
+
+        # aarch64 domains always boot UEFI; opt out of Secure Boot so every
+        # profile's image can boot (Fedora's aarch64 image ships an unsigned
+        # GRUB — see uefi_no_secboot_loader). None on hosts without a
+        # no-secboot firmware: virt-install keeps its default there.
+        if self.host_arch() == "aarch64":
+            loader = self.uefi_no_secboot_loader()
+            if loader:
+                cmd += ["--boot", f"uefi=on,loader={loader}"]
 
         if mounts:
             # virtiofs requires guest RAM shared with the virtiofsd process.
@@ -735,10 +883,12 @@ class Virtualizer:
             ]
 
         if _passthrough(cmd).returncode != 0:
-            # Clean up orphan resources.
+            # Clean up orphan resources (--nvram: aarch64 UEFI domains,
+            # see destroy_vm; a failed undefine here would leave the domain).
             _quiet(["virsh", "--quiet", "destroy", name])
-            _quiet(["virsh", "--quiet", "undefine", name])
+            _quiet(["virsh", "--quiet", "undefine", "--nvram", name])
             self.delete_volume_quiet(volume)
+            self.delete_cloud_init_iso_quiet(name)
             raise VirtError(
                 f"virt-install failed for '{name}' (see errors above); "
                 f"no VM left behind",
@@ -1125,7 +1275,10 @@ class Virtualizer:
         try:
             if was_running:
                 _run(["virsh", "--quiet", "destroy", name])
-            _run(["virsh", "--quiet", "undefine", name])
+            # --nvram: aarch64 UEFI domains carry an NVRAM variable store
+            # that libvirt refuses to leave behind on a plain undefine;
+            # no-op for NVRAM-less (x86_64 SeaBIOS) domains.
+            _run(["virsh", "--quiet", "undefine", "--nvram", name])
         except RuntimeError as exc:
             raise VirtError(
                 f"failed to destroy/undefine VM '{name}'", "vm-destroy-failed"
@@ -1145,6 +1298,12 @@ class Virtualizer:
                 f"{result.stderr.strip()}",
                 "volume-delete-failed",
             )
+
+        # 3. Best-effort: the NoCloud seed ISO volume. It stays attached for
+        #    the VM's lifetime — the domain XML pins its file path, so a
+        #    deleted seed would break `virsh start` (and --autostart) — and
+        #    is removed here (absent file is fine).
+        self.delete_cloud_init_iso_quiet(name)
 
         if volume_absent:
             warning = (
