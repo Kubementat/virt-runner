@@ -250,6 +250,24 @@ def render_user_data(
     )
 
 
+def script_command(script: Path) -> str:
+    """Remote shell line that runs *script*, piped in on ssh's stdin.
+
+    A ``#!`` line wins; otherwise ``.py`` runs under ``python3`` and anything
+    else under ``bash``. ``cloud-init status --wait`` comes first: sshd answers
+    before cloud-init finishes, and package managers hold their locks until
+    then. Its exit code is ignored (``degraded`` still means "done").
+    """
+    with script.open("rb") as f:
+        shebang = f.read(2) == b"#!"
+    runner = "" if shebang else "python3 " if script.suffix == ".py" else "bash "
+    return (
+        'f=$(mktemp) && cat >"$f" && chmod +x "$f" || exit 1; '
+        "cloud-init status --wait >/dev/null 2>&1; "
+        f'{runner}"$f" </dev/null; rc=$?; rm -f "$f"; exit $rc'
+    )
+
+
 def render_meta_data(id_val: str, name: str) -> str:
     """Generate cloud-init meta-data YAML."""
     return (
@@ -956,6 +974,29 @@ class Virtualizer:
                 "ssh-timeout",
                 "ssh-verify",
             )
+
+    def run_script(
+        self, user: str, ip: str, script: Path, identity: str | None = None
+    ) -> int:
+        """Run a host-side *script* in the guest as *user*; return its exit code.
+
+        The file travels on ssh's stdin (no scp round-trip). Its output streams
+        to stderr in both modes so ``--json`` stdout stays one document.
+        """
+        cmd = [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "LogLevel=ERROR",
+            *_ssh_args(identity),
+            f"{user}@{ip}",
+            script_command(script),
+        ]
+        with script.open("rb") as f:
+            return subprocess.run(
+                cmd, stdin=f, stdout=sys.stderr, check=False, env=_CHILD_ENV
+            ).returncode
 
     # ------------------------------------------------------------------
     # Access

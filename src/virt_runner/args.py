@@ -76,6 +76,19 @@ class JsonCommand(click.Command):
         output.set_json_mode(bool(ctx.params.get(JSON_PARAM)))
         return ctx
 
+    def invoke(self, ctx: click.Context) -> Any:
+        """Same envelope for usage errors raised by the callback itself
+        (cross-option checks such as ``--release`` or ``--script``/``--no-boot``).
+        """
+        try:
+            return super().invoke(ctx)
+        except click.UsageError as exc:
+            if not output.is_json_mode():
+                raise
+            output.fail(
+                self.name, exc.format_message(), code="usage", exit_code=exc.exit_code
+            )
+
 
 def command(name: str, **kwargs: Any) -> Any:
     """``click.command`` with :class:`JsonCommand` as the default class."""

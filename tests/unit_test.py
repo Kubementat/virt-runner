@@ -1,12 +1,19 @@
 """Pure-logic checks (no libvirt, no network). Run: uv run tests/unit_test.py"""
 
+import json
+
 import virt_runner.virtualizer as vz
 from virt_runner import images
 from virt_runner.cmd_create import _validate_mounts, _validate_user
 from virt_runner.errors import VirtError
 from virt_runner.images import _newest_match, _resolve_glob, _sums_entries
 from virt_runner.profiles import PROFILES, _same_dir
-from virt_runner.virtualizer import Virtualizer, render_meta_data, render_user_data
+from virt_runner.virtualizer import (
+    Virtualizer,
+    render_meta_data,
+    render_user_data,
+    script_command,
+)
 
 
 def main() -> None:
@@ -261,6 +268,31 @@ def main() -> None:
         raise AssertionError("expected VirtError")
     except VirtError as e:
         assert e.code == "virtiofsd-missing", e.code
+
+    # script_command — #! wins, else .py -> python3, else bash; waits for cloud-init.
+    sdir = Path(tempfile.mkdtemp())
+    (sdir / "a.py").write_text("#!/bin/sh\necho hi\n")
+    (sdir / "b.py").write_text("print('hi')\n")
+    (sdir / "c.sh").write_text("echo hi\n")
+    assert '; "$f" </dev/null' in script_command(sdir / "a.py")
+    assert 'python3 "$f"' in script_command(sdir / "b.py")
+    assert 'bash "$f"' in script_command(sdir / "c.sh")
+    assert "cloud-init status --wait" in script_command(sdir / "c.sh")
+
+    # Usage errors raised inside the command body still honour --json (exit 2).
+    from click.testing import CliRunner
+
+    from virt_runner.cli import main as cli_main
+    from virt_runner.output import set_json_mode
+
+    for argv in (
+        ["create", "--no-boot", "--script", str(sdir / "c.sh"), "x", "--json"],
+        ["create", "--distro", "arch", "--release", "99", "x", "--json"],
+    ):
+        res = CliRunner().invoke(cli_main, argv)
+        assert res.exit_code == 2, (argv, res.output)
+        assert json.loads(res.stdout)["error"]["code"] == "usage", res.output
+    set_json_mode(False)
 
     print("unit checks ok")
 

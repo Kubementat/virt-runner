@@ -46,6 +46,7 @@ uv run virt-runner create NAME   # build + boot; --distro (ubuntu|arch|fedora),
                                  # --ram/--vcpu GiB/ count, --disk GiB,
                                  # --release (default per-distro), --image URL, --user,
                                  # --ssh-key, --mount HOST[:GUEST] (repeatable; virtiofs share),
+                                 # --script FILE (repeatable; runs in the guest after boot),
                                  # --no-boot, --keep-going
 uv run virt-runner destroy NAME  # undefine + delete disk (idempotent)
 uv run virt-runner list          # only VMs whose disk lives in vm-pool
@@ -78,7 +79,7 @@ uv run virt-runner create myvm --json | jq -r .vm.ssh_command
 - `status` — `success` or `error`.
 - `error` — `null` on success, else `{code, message}` plus `stage` when the
   failure belongs to a `create` stage (`preflight`, `image`, `cloud-init`,
-  `create`, `wait-ip`, `ssh-verify`).
+  `create`, `wait-ip`, `ssh-verify`, `script`).
 - The remaining top-level keys are the command's sections (`vm`, `image`,
   `vms`, …) — the same state the text report prints.
 
@@ -115,6 +116,7 @@ failure, `2` usage error.
 | `lease-timeout` | No DHCP lease within the wait window |
 | `ssh-timeout` | The SSH round-trip never succeeded within the wait window |
 | `virtiofsd-missing` | `--mount` given but `/usr/libexec/virtiofsd` is not installed |
+| `script-failed` | A `--script` exited non-zero (the VM is kept running) |
 
 ## Shared directories
 
@@ -138,6 +140,26 @@ terminates.
 Out of scope: read-only mounts, adding/removing mounts on an existing VM, showing
 mounts in `list`, UID/GID remapping, and older hosts where virtiofsd lives at
 `/usr/lib/qemu/virtiofsd` (Ubuntu 22.04).
+
+## Provisioning scripts
+
+Use `--script FILE` to run a host-side script in the guest once `create` has verified
+SSH, e.g. to pre-install software so the VM is ready to use. Repeatable; scripts run
+in the given order and the first non-zero exit stops the run.
+
+- Runs as the cloud user (`--user`), who has passwordless `sudo` — use `sudo` for
+  package installs. stdin is `/dev/null`, so pass `-y` to package managers.
+- Waits for `cloud-init status --wait` first (package-manager locks, `--mount` shares).
+- Interpreter: a `#!` line wins; otherwise `.py` runs under `python3`, anything else
+  under `bash`. The Arch image ships no `python3`.
+- Output streams to stderr (also under `--json`). The JSON document carries
+  `scripts: [{path, exit_code}]` (empty when none).
+- A failing script exits `1` with `script-failed` (stage `script`); the VM stays up
+  for debugging via `virt-runner ssh NAME`. `--script` with `--no-boot` is a usage error.
+
+```bash
+uv run virt-runner create dev --script setup.sh --script configure.py
+```
 
 ## Integration test
 
