@@ -2,7 +2,7 @@
 
 Run with: uv run tests/integration_test.py
 
-Flow: create 2 Ubuntu VMs + 1 Arch VM + 1 Fedora VM -> list -> ssh hello world
+Flow: create 2 Ubuntu VMs (with passing / failing --script) + 1 Arch VM + 1 Fedora VM -> list -> ssh hello world
 + shared-dir read/write in each -> ssh <name> session in each -> destroy all
 -> list (expect 0).
 """
@@ -93,6 +93,13 @@ def main() -> None:
     # Create a shared directory for the mount tests.
     share = Path(tempfile.mkdtemp(prefix="virt-runner-it-share-"))
     (share / "marker").write_text("from-host\n")
+    # --script fixtures: no shebang, so the interpreter comes from the extension.
+    scripts = Path(tempfile.mkdtemp(prefix="virt-runner-it-scripts-"))
+    (scripts / "ok.sh").write_text("id -un > ~/script-sh\n")
+    (scripts / "ok.py").write_text(
+        "import pathlib; (pathlib.Path.home() / 'script-py').write_text('py')\n"
+    )
+    (scripts / "fail.sh").write_text("echo failing >&2; exit 3\n")
 
     # Best-effort cleanup of leftovers from a previous interrupted run.
     # Still --json: even the "vm-not-defined" error path must carry an
@@ -117,10 +124,32 @@ def main() -> None:
     )
     check(rc == 1, f"vm-not-defined exits 1, got {rc}")
 
+    doc, rc = virt_runner(
+        "create",
+        "--no-boot",
+        "--script",
+        str(scripts / "ok.sh"),
+        "it-x",
+        allow_fail=True,
+    )
+    check(
+        rc == 2 and doc["error"]["code"] == "usage", "--script with --no-boot is usage"
+    )
+
     try:
-        # 1. Create two VMs.
+        # 1. Create two VMs: A runs two passing scripts, B one failing script
+        # (script-failed, exit 1, VM kept running for the later steps).
+        script_args = {
+            NAMES[0]: [
+                "--script",
+                str(scripts / "ok.sh"),
+                "--script",
+                str(scripts / "ok.py"),
+            ],
+            NAMES[1]: ["--script", str(scripts / "fail.sh")],
+        }
         for name in NAMES:
-            doc, _ = virt_runner(
+            doc, rc = virt_runner(
                 "create",
                 "--ram",
                 "1",
@@ -130,9 +159,30 @@ def main() -> None:
                 "8",
                 "--mount",
                 f"{share}:/mnt/share",
+                *script_args[name],
                 name,
+                allow_fail=name == NAMES[1],
             )
-            check(doc["status"] == "success", f"create {name} succeeded")
+            if name == NAMES[1]:
+                check(
+                    rc == 1
+                    and doc["error"]["code"] == "script-failed"
+                    and doc["error"]["stage"] == "script"
+                    and doc["scripts"]
+                    == [{"path": str(scripts / "fail.sh"), "exit_code": 3}],
+                    f"{name} failing script is script-failed, exit 1",
+                )
+            else:
+                check(doc["status"] == "success", f"create {name} succeeded")
+                check(
+                    [s["exit_code"] for s in doc["scripts"]] == [0, 0],
+                    f"{name} reports both scripts exit 0",
+                )
+                out = ssh_run(doc["vm"]["ssh_command"], "cat ~/script-sh ~/script-py")
+                check(
+                    out == f"{doc['vm']['ssh_user']}\npy",
+                    f"{name} scripts ran as the cloud user (sh + py)",
+                )
             check(doc["booted"], f"{name} booted")
             check(doc["vm"]["ip"] is not None, f"{name} has an IP")
             check(doc["image"]["verified"], f"{name} image verified")
@@ -299,6 +349,7 @@ def main() -> None:
         for name in ALL:
             virt_runner("destroy", name, allow_fail=True)
         shutil.rmtree(share, ignore_errors=True)
+        shutil.rmtree(scripts, ignore_errors=True)
 
 
 if __name__ == "__main__":

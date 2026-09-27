@@ -1,5 +1,5 @@
 """``create`` subcommand — full pipeline: preflight → image → cloud-init →
-virt-install → IP/SSH → access info.
+virt-install → IP/SSH → scripts → access info.
 
 Both output modes read from one accumulating run state (spec §11.3): the text
 report prints the fields it has always printed, ``--json`` renders the same
@@ -17,6 +17,7 @@ import click
 
 from virt_runner import output
 from virt_runner.args import command
+from virt_runner.errors import VirtError
 from virt_runner.images import ImageFetch, fetch_and_verify_image
 from virt_runner.profiles import PROFILES
 from virt_runner.virtualizer import Virtualizer, lease_file
@@ -28,6 +29,7 @@ _DEFAULT_CODE = {
     "create": "vm-create-failed",
     "wait-ip": "lease-timeout",
     "ssh-verify": "ssh-timeout",
+    "script": "script-failed",
 }
 
 
@@ -136,6 +138,8 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
             "verified": image.verified,
         }
 
+    fields["scripts"] = run_state["scripts"]
+
     return fields
 
 
@@ -198,6 +202,15 @@ def _create_document(run_state: dict[str, Any]) -> dict[str, Any]:
     "repeatable [default GUEST: /mnt/<basename of HOST>]",
 )
 @click.option(
+    "--script",
+    "scripts",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True, path_type=Path),
+    help="Run a host script in the guest as the cloud user once it is up "
+    "(after cloud-init finishes); repeatable, runs in order. #! line wins, "
+    "else .py -> python3, other -> bash",
+)
+@click.option(
     "--no-boot",
     is_flag=True,
     default=False,
@@ -220,6 +233,7 @@ def cmd_create(
     user: str | None,
     ssh_key: str,
     mounts: list[dict[str, str]],
+    scripts: tuple[Path, ...],
     no_boot: bool,
     keep_going: bool,
     as_json: bool,
@@ -228,6 +242,9 @@ def cmd_create(
     output.set_json_mode(as_json)
     v = Virtualizer()
     profile = PROFILES[distro]
+
+    if scripts and no_boot:
+        raise click.UsageError("--script needs a booted VM; drop --no-boot")
 
     # --release/--image precedence (D1): an explicit --release wins over
     # --image regardless of order, even when its value equals the default.
@@ -261,6 +278,7 @@ def cmd_create(
         "booted": False,
         "created": False,
         "mounts": mounts,
+        "scripts": [],
     }
 
     # --------------------------------------------------------------
@@ -327,6 +345,21 @@ def cmd_create(
             v.verify_ssh_reachable(
                 name, effective_user, ip, identity=run_state["ssh_identity"]
             )
+
+            stage = "script"
+            for script in scripts:
+                output.progress(f"Running script: {script}")
+                rc = v.run_script(
+                    effective_user, ip, script, identity=run_state["ssh_identity"]
+                )
+                run_state["scripts"].append({"path": str(script), "exit_code": rc})
+                if rc != 0:
+                    raise VirtError(
+                        f"script {script} exited {rc} — VM kept, inspect with: "
+                        f"virt-runner ssh {name}",
+                        "script-failed",
+                        "script",
+                    )
     except RuntimeError as exc:
         output.fail_with(
             "create",
@@ -354,5 +387,7 @@ def cmd_create(
         click.echo(f"SSH:     virt-runner ssh {name}")
     for m in mounts:
         click.echo(f"Mount:   {m['source']} -> {m['target']}")
+    for s in run_state["scripts"]:
+        click.echo(f"Script:  {s['path']} (exit {s['exit_code']})")
     for line in output.text_access_lines(name):
         click.echo(line)

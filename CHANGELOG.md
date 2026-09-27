@@ -9,6 +9,11 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ### Added
 
+- **`create --script FILE`** — repeatable flag that runs a host script in the guest
+  as the cloud user after SSH is verified and cloud-init has finished. Interpreter from
+  the `#!` line, else `.py` → `python3`, other → `bash`. Output streams to stderr;
+  `--json` reports `scripts: [{path, exit_code}]`. A non-zero exit fails with the new
+  `script-failed` code (stage `script`) and keeps the VM.
 - **`create --mount HOST[:GUEST]`** — repeatable flag to share a host directory into
   the guest via virtiofs. The mount is ready when `create` returns and persists across
   guest reboots (first-boot `bootcmd` mount plus an fstab entry, since the NoCloud
@@ -33,6 +38,9 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ### Fixed
 
+- **`--json` usage errors from cross-option checks** — e.g. `--distro arch --release 99`
+  printed click's plain-text usage error with empty stdout; now the `usage` envelope
+  (exit 2) like every other usage error.
 - **Fedora image download 404s** — during point releases some mirrors keep a
   stale index that still lists a build whose file is gone; the glob resolved
   to that dead "newest" name and the download failed. The glob now resolves

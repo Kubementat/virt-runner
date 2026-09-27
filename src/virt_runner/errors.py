@@ -19,7 +19,7 @@ class VirtError(RuntimeError):
             minus the ``vm-<command>: `` prefix.
         code: Stable kebab-case code from spec §5.2.
         stage: ``vm-create`` pipeline stage (``preflight``, ``image``,
-            ``cloud-init``, ``create``, ``wait-ip``, ``ssh-verify``) when the
+            ``cloud-init``, ``create``, ``wait-ip``, ``ssh-verify``, ``script``) when the
             failure belongs to one.
     """
 
