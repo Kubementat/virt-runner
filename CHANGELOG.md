@@ -9,6 +9,8 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ### Added
 
+- **`virt-runner --version`** — prints the installed package version
+  (`virt-runner, version X.Y.Z`).
 - **`create --script FILE`** — repeatable flag that runs a host script in the guest
   as the cloud user after SSH is verified and cloud-init has finished. Interpreter from
   the `#!` line, else `.py` → `python3`, other → `bash`. Output streams to stderr;

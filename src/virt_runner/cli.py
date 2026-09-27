@@ -5,6 +5,7 @@ Usage:
     uv run virt-runner destroy <NAME> [--json]
     uv run virt-runner list [OPTIONS] [--json]
     uv run virt-runner ssh <VM_NAME> [--json]
+    uv run virt-runner --version
 
 ``--json`` (all subcommands) makes stdout carry exactly one JSON document and
 prints nothing else; see :mod:`virt_runner.output` and spec §5.
@@ -23,6 +24,7 @@ from virt_runner.cmd_ssh import cmd_ssh
 
 
 @click.group()
+@click.version_option(package_name="virt-runner", prog_name="virt-runner")
 def main():
     """virt-runner — one-command KVM VM creation (Ubuntu, Arch, Fedora) via libvirt + cloud-init."""
 

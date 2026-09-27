@@ -107,6 +107,15 @@ def main() -> None:
     for name in ALL:
         virt_runner("destroy", name, allow_fail=True)
 
+    # 0. --version works without libvirt.
+    proc = subprocess.run(
+        ["virt-runner", "--version"], capture_output=True, text=True, check=False
+    )
+    check(
+        proc.returncode == 0 and proc.stdout.startswith("virt-runner, version "),
+        f"--version prints the version, got {proc.stdout!r}",
+    )
+
     # 0. Negative checks (no VMs created).
     doc, rc = virt_runner("create", "1bad", allow_fail=True)
     check(doc["status"] == "error", "create with an invalid name reports an error")

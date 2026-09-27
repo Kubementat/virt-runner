@@ -294,6 +294,13 @@ def main() -> None:
         assert json.loads(res.stdout)["error"]["code"] == "usage", res.output
     set_json_mode(False)
 
+    # --version reports the installed package version.
+    from importlib.metadata import version
+
+    res = CliRunner().invoke(cli_main, ["--version"])
+    assert res.exit_code == 0, res.output
+    assert res.output.strip() == f"virt-runner, version {version('virt-runner')}"
+
     print("unit checks ok")
 
 
