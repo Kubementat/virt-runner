@@ -5,6 +5,9 @@ Run with: uv run tests/integration_test.py
 Flow: create 2 Ubuntu VMs (with passing / failing --script) + 1 Arch VM + 1 Fedora VM -> list -> ssh hello world
 + shared-dir read/write in each -> ssh <name> session in each -> destroy all
 -> list (expect 0).
+
+The Arch leg is x86_64-only (arch-boxes ships no aarch64 image): on aarch64
+hosts it is skipped and the Ubuntu + Fedora legs are the real aarch64 e2e.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from virt_runner.virtualizer import Virtualizer
@@ -22,7 +26,9 @@ from virt_runner.virtualizer import Virtualizer
 NAMES = ["it-vm-a", "it-vm-b"]
 ARCH_NAME = "it-vm-arch"
 FEDORA_NAME = "it-vm-fedora"
-ALL = NAMES + [ARCH_NAME, FEDORA_NAME]
+# arch-boxes ships x86_64 images only: skip the arch leg elsewhere.
+RUN_ARCH = Virtualizer.host_arch() == "x86_64"
+ALL = NAMES + ([ARCH_NAME] if RUN_ARCH else []) + [FEDORA_NAME]
 
 
 def virt_runner(*args: str, allow_fail: bool = False) -> tuple[dict, int]:
@@ -193,6 +199,10 @@ def main() -> None:
                     f"{name} scripts ran as the cloud user (sh + py)",
                 )
             check(doc["booted"], f"{name} booted")
+            check(
+                doc["vm"]["arch"] == Virtualizer.host_arch(),
+                f"{name} reports the host arch {doc['vm']['arch']}",
+            )
             check(doc["vm"]["ip"] is not None, f"{name} has an IP")
             check(doc["image"]["verified"], f"{name} image verified")
             check(
@@ -230,27 +240,41 @@ def main() -> None:
         check(rc == 1, f"vm-already-defined exits 1, got {rc}")
 
         # 1b. Arch leg: distro profile, arch-boxes image + sidecar .SHA256,
-        # wheel-group user `arch`, `generic` osinfo boot.
-        doc, _ = virt_runner(
-            "create",
-            "--distro",
-            "arch",
-            "--ram",
-            "1",
-            "--vcpu",
-            "1",
-            "--disk",
-            "8",
-            "--mount",
-            f"{share}:/mnt/share",
-            ARCH_NAME,
-        )
-        check(doc["status"] == "success", f"create {ARCH_NAME} succeeded")
-        check(doc["booted"], f"{ARCH_NAME} booted")
-        check(doc["vm"]["distro"] == "arch", f"create {ARCH_NAME} reports distro arch")
-        check(doc["vm"]["ssh_user"] == "arch", f"create {ARCH_NAME} uses user arch")
-        check(doc["vm"]["ip"] is not None, f"{ARCH_NAME} has an IP")
-        check(doc["image"]["verified"], f"{ARCH_NAME} image verified")
+        # wheel-group user `arch`, `generic` osinfo boot. Skipped on
+        # aarch64 hosts — arch-boxes ships x86_64-only images.
+        if RUN_ARCH:
+            doc, _ = virt_runner(
+                "create",
+                "--distro",
+                "arch",
+                "--ram",
+                "1",
+                "--vcpu",
+                "1",
+                "--disk",
+                "8",
+                "--mount",
+                f"{share}:/mnt/share",
+                ARCH_NAME,
+            )
+            check(doc["status"] == "success", f"create {ARCH_NAME} succeeded")
+            check(doc["booted"], f"{ARCH_NAME} booted")
+            check(
+                doc["vm"]["distro"] == "arch",
+                f"create {ARCH_NAME} reports distro arch",
+            )
+            check(
+                doc["vm"]["ssh_user"] == "arch",
+                f"create {ARCH_NAME} uses user arch",
+            )
+            check(doc["vm"]["ip"] is not None, f"{ARCH_NAME} has an IP")
+            check(doc["image"]["verified"], f"{ARCH_NAME} image verified")
+        else:
+            check(
+                True,
+                f"arch leg skipped on {Virtualizer.host_arch()} host "
+                "(arch-boxes ships x86_64-only images)",
+            )
 
         # 1c. Fedora leg: profile, Fedora cloud image + block-format checksum,
         # wheel-group user `fedora`, `generic` osinfo boot.
@@ -297,11 +321,12 @@ def main() -> None:
             f"list ssh_command for {NAMES[0]} uses the default key: {vm_a['ssh_command']}",
         )
 
-        arch_entry = next(vm for vm in doc["vms"] if vm["name"] == ARCH_NAME)
-        check(
-            arch_entry["ssh_user"] == "arch",
-            f"list reports per-VM user arch for {ARCH_NAME}, got {arch_entry['ssh_user']}",
-        )
+        if RUN_ARCH:
+            arch_entry = next(vm for vm in doc["vms"] if vm["name"] == ARCH_NAME)
+            check(
+                arch_entry["ssh_user"] == "arch",
+                f"list reports per-VM user arch for {ARCH_NAME}, got {arch_entry['ssh_user']}",
+            )
 
         # 3. SSH hello world into each VM (one-shot ssh disconnects on its own).
         # For the Arch VM this proves the injected ed25519 key is accepted and
@@ -335,6 +360,27 @@ def main() -> None:
                 "nofail" in fstab and "/mnt/share" in fstab,
                 f"{vm['name']} recorded the virtiofs fstab entry",
             )
+
+        # 3c. Cold-boot survival: the NoCloud seed volume lives until destroy
+        # (a deleted seed would break `virsh start` — every VM is autostart),
+        # so a plain destroy+start must bring the guest back. cloud-init is
+        # disabled after the first boot, so the fstab entry — not bootcmd —
+        # re-mounts the share: prove it, not just grep for it.
+        name = NAMES[0]
+        subprocess.run(["virsh", "--quiet", "destroy", name], check=True)
+        subprocess.run(["virsh", "--quiet", "start", name], check=True)
+        for _ in range(60):
+            doc, rc = virt_runner("ssh", name, allow_fail=True)
+            if rc == 0:
+                break
+            time.sleep(2)
+        check(rc == 0, f"{name} answers ssh after a cold start")
+        doc, _ = virt_runner("list")
+        vm_a2 = next(vm for vm in doc["vms"] if vm["name"] == name)
+        out = ssh_run(
+            vm_a2["ssh_command"], "mountpoint -q /mnt/share && echo remounted"
+        )
+        check("remounted" in out, f"{name} re-mounted the virtiofs share from fstab")
 
         # 3b. `ssh <name>` opens a real session in the VM — stdin is /dev/null,
         # so the remote shell sees EOF and exits 0; a non-zero exit fails the run.

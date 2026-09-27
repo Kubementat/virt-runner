@@ -118,7 +118,8 @@ done
 # Packages
 # -----------------------------------------------------------------------------
 # What src/virt_runner/virtualizer.py shells out to: virsh, virt-install,
-# curl, uuidgen, ssh — plus qemu tools and jq for --json consumers.
+# curl, uuidgen, ssh, xorrisofs (NoCloud seed ISO) — plus qemu tools and jq
+# for --json consumers.
 
 # Concrete KVM host package per architecture. 'qemu-kvm' is not a portable
 # name: it only exists on x86 and, since Ubuntu 26.04, it is a purely virtual
@@ -155,6 +156,7 @@ declare -a BASE_PACKAGES=(
   # Called directly by the pipeline
   curl
   ca-certificates
+  xorriso                # xorrisofs: `create` builds the NoCloud seed ISO with it
   uuid-runtime           # uuidgen
   openssh-client         # ssh reachability check
   jq                     # `virt-runner list --json | jq`

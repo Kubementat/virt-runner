@@ -9,6 +9,11 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ### Added
 
+- **aarch64 host support** — `create` now works on aarch64 hosts (Ubuntu and
+  Fedora aarch64 cloud images, verified as before; UEFI firmware is built into
+  `qemu-system-aarch64`, so no `--boot` change); `--distro arch` on aarch64
+  fails with the new `image-arch-unavailable` code (arch-boxes ships
+  x86_64-only images).
 - **`virt-runner --version`** — prints the installed package version
   (`virt-runner, version X.Y.Z`).
 - **`create --script FILE`** — repeatable flag that runs a host script in the guest
@@ -37,12 +42,43 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
   all four distro legs), and `--console none` is replaced by
   `--noautoconsole` so the recommended `virsh console NAME` actually has a
   serial console device to attach to.
+- **NoCloud seed handling** — `create` no longer uses virt-install's
+  `--cloud-init` flag (virt-install 4.1.0 deletes its generated ISO in exit
+  cleanup while the guest is still in UEFI — fatal on aarch64, where edk2's
+  CDROM boot attempt loops on `Reset System`). The seed ISO is now built by
+  virt-runner (`xorrisofs -V cidata`), stored as a `vm-pool` volume
+  (`<NAME>-cloudinit.iso`) attached as a plain `--disk` CDROM for the VM's
+  lifetime (removed on `destroy` or when `create` fails — deleting it
+  earlier would break `virsh start`, and every VM is autostart); a
+  `runcmd` in user-data keeps cloud-init disabled for later boots
+  (replacing `--cloud-init disable=on`) (see
+  `docs/lessons-learned/008-virt-install-cloudinit-iso-deletion.md`).
 
 ### Fixed
 
 - **`--json` usage errors from cross-option checks** — e.g. `--distro arch --release 99`
   printed click's plain-text usage error with empty stdout; now the `usage` envelope
   (exit 2) like every other usage error.
+- **Unverified Fedora images during point-release mirror syncs** — some
+  mirrors list a fresh build's image before its CHECKSUM file, so the
+  newest glob candidate downloaded unverified and the pipeline accepted it
+  (D1 skip). Rotating-image globs now fall back to the next-newest build
+  when the newest one has no verifiable checksums, like they already did
+  for dead (404) candidates; the skip stays the last resort when no
+  candidate verifies.
+- **Fedora aarch64 never booted** — libvirt's default aarch64 firmware on
+  some hosts enforces Secure Boot, which rejects Fedora's aarch64 cloud
+  image (unsigned GRUB) with a firmware `Security Violation` dialog: the
+  domain stayed `running` but never reached the kernel, so `create` timed
+  out in `wait-ip` with a silent console. aarch64 domains are now created
+  with Secure Boot disabled (`--boot uefi=on,loader=<no-secboot firmware>`,
+  path looked up via `virsh domcapabilities`; x86_64 is unchanged) (see
+  `docs/lessons-learned/009-aarch64-secure-boot-unsigned-grub.md`).
+- **aarch64 teardown** — `destroy` of a UEFI (aarch64) domain failed with
+  `vm-destroy-failed` because libvirt refuses a plain `virsh undefine` while
+  the domain's NVRAM variable store exists; `undefine` now passes `--nvram`
+  (discards the store; no-op for NVRAM-less x86_64 domains) (see
+  `docs/lessons-learned/007-aarch64-nvram-undefine.md`).
 - **Fedora image download 404s** — during point releases some mirrors keep a
   stale index that still lists a build whose file is gone; the glob resolved
   to that dead "newest" name and the download failed. The glob now resolves
