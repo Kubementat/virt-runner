@@ -80,12 +80,13 @@ classDiagram
     class JsonCommand {
         +get_params(ctx)
         +make_context(info_name, args, parent)
+        +invoke(ctx)
     }
-    note for JsonCommand "get_params: appends the shared --json option. make_context: pre-scans raw args for --json BEFORE parsing, so usage errors are reported as JSON (exit 2) when requested."
+    note for JsonCommand "get_params: appends the shared --json option. make_context: pre-scans raw args for --json BEFORE parsing, so usage errors are reported as JSON (exit 2) when requested. invoke: same envelope for UsageErrors raised inside the callback (cross-option checks)."
 
     class cmd_create {
         <<JsonCommand instance>>
-        pipeline: preflight → image → cloud-init → create → wait-ip → ssh-verify
+        pipeline: preflight → image → cloud-init → create → wait-ip → ssh-verify → script
     }
     class cmd_destroy {
         <<JsonCommand instance>>
@@ -118,6 +119,7 @@ classDiagram
         +domain_meta(name)
         +wait_for_ip(name, mac, lease_file)
         +verify_ssh_reachable(name, user, ip, identity)
+        +run_script(user, ip, script, identity)
         +vm_ip(name, lease_file)
         +ssh_shell(user, ip, identity)
         +list_vms(lease_file)
@@ -212,7 +214,9 @@ flowchart TD
     C -->|yes| C1["JSON error envelope, code=usage, exit 2"]
     C -->|no| C2["click usage error, exit 2"]
     B -->|parsed| F["set_json_mode(as_json)<br/>v = Virtualizer(); profile = PROFILES[distro]"]
-    F --> G["D1 precedence: explicit --release wins over --image<br/>resolve image_url, effective_release, effective_user<br/>build run_state dict (accumulated through the run)"]
+    F --> F1{"--script with --no-boot?<br/>unsupported --release?"}
+    F1 -->|yes| C3["UsageError → JsonCommand.invoke:<br/>JSON envelope code=usage (or click text), exit 2"]
+    F1 -->|no| G["D1 precedence: explicit --release wins over --image<br/>resolve image_url, effective_release, effective_user<br/>build run_state dict (accumulated through the run)"]
 
     G --> H["stage := preflight"]
     H --> H1{"x86_64? · virsh list ok?<br/>pool vm-pool active?<br/>net default active?<br/>domain absent?<br/>virtiofsd present (if --mount)?"}
@@ -237,14 +241,16 @@ flowchart TD
     L -->|no| N["stage := wait-ip<br/>poll dnsmasq lease file (JSON, legacy fallback), 120 s @ 2 s<br/>lease accepted only while domain is running<br/>fallbacks ONLY if lease file unusable: domifaddr (30 s), arp -n"]
     N --> O["stage := ssh-verify<br/>poll ssh BatchMode probe (injected identity, known_hosts=/dev/null), 90 s"]
 
+    O --> O1["stage := script (per --script, in order)<br/>run_script: file piped over ssh as the cloud user;<br/>cloud-init status --wait, then #! / python3 (.py) / bash<br/>output → stderr; run_state.scripts += {path, exit_code}<br/>non-zero → VirtError script-failed (VM kept running)"]
+
     M --> P
-    O --> P
+    O1 --> P
     P{"done without error?"}
 
-    P -->|RuntimeError at any stage| X["output.fail_with: code from VirtError else stage default<br/>(preflight→libvirt-unreachable, image→image-download-failed,<br/>cloud-init→cloud-init-failed, create→vm-create-failed,<br/>wait-ip→lease-timeout, ssh-verify→ssh-timeout)<br/>JSON: error envelope + partial run_state (vm/image sections already earned)<br/>text: vm-create: message — exit 1"]
+    P -->|RuntimeError at any stage| X["output.fail_with: code from VirtError else stage default<br/>(preflight→libvirt-unreachable, image→image-download-failed,<br/>cloud-init→cloud-init-failed, create→vm-create-failed,<br/>wait-ip→lease-timeout, ssh-verify→ssh-timeout,<br/>script→script-failed)<br/>JSON: error envelope + partial run_state (vm/image sections already earned)<br/>text: vm-create: message — exit 1"]
     P -->|success| Q{"--json?"}
-    Q -->|yes| R["emit success envelope: booted + vm{name,uuid,state,specs,mac,ip,<br/>dns_name,ssh_user,ssh/console/teardown commands,autostart} + image{...}"]
-    Q -->|no| S["text: Name/UUID, Distro, IP (+ name.default), SSH hint,<br/>mount lines, Console/Teardown lines"]
+    Q -->|yes| R["emit success envelope: booted + vm{name,uuid,state,specs,mac,ip,<br/>dns_name,ssh_user,ssh/console/teardown commands,autostart} + image{...}<br/>+ scripts[{path, exit_code}] (always present)"]
+    Q -->|no| S["text: Name/UUID, Distro, IP (+ name.default), SSH hint,<br/>mount lines, script lines, Console/Teardown lines"]
 ```
 
 Key invariants of the pipeline:
