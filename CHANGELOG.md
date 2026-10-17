@@ -7,6 +7,13 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ## [Unreleased]
 
+_No unreleased changes at present._
+
+## [0.4.0] - 2026-10-18
+
+> Supersedes the `0.3.1` bump in `8fddb23`: that commit shipped new flags and new JSON keys,
+> so semver puts it in a minor release. `0.3.1` was never tagged and is not a release.
+
 ### Added
 
 - **aarch64 host support** — `create` now works on aarch64 hosts (Ubuntu and
