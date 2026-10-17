@@ -29,6 +29,9 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 - **`vm.mounts` in `--json` output** — always present (empty list when no mounts).
 - **`virtiofsd-missing` error code** — `--mount` given but `/usr/libexec/virtiofsd`
   is not installed (stage: `preflight`).
+- **Subcommand aliases** — `c` = `create`, `d` = `destroy`, `ls` = `list`,
+  `s` = `ssh`. Same flags, exit codes and JSON `tool` ids (`vm-create`, not `vm-c`);
+  `--help` still lists each command once.
 
 ### Changed
 

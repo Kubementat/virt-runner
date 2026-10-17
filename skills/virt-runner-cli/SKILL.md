@@ -1,7 +1,7 @@
 ---
 name: virt-runner-cli
 description: |
-  Expert use of the `virt-runner` CLI: one command to a running, SSH-reachable Ubuntu, Arch or Fedora KVM guest via libvirt (qemu:///system) + cloud-init, with `create`, `destroy`, `list` and `ssh` subcommands and a stable `--json` contract. Use when the user mentions virt-runner, wants to create, provision, list, SSH into or destroy throwaway/test KVM or libvirt VMs, spin up a clean Ubuntu/Arch/Fedora VM to test something, share host directories into a VM (virtiofs `--mount`), provision a VM with setup scripts (`--script`), run a multi-distro test matrix, script VM lifecycles with JSON/jq, or debug a failed VM create (lease/SSH timeouts, image download/verification, script failures).
+  Expert use of the `virt-runner` CLI: one command to a running, SSH-reachable Ubuntu, Arch or Fedora KVM guest via libvirt (qemu:///system) + cloud-init, with `create`, `destroy`, `list` and `ssh` subcommands (short aliases `c`, `d`, `ls`, `s`) and a stable `--json` contract. Use when the user mentions virt-runner, wants to create, provision, list, SSH into or destroy throwaway/test KVM or libvirt VMs, spin up a clean Ubuntu/Arch/Fedora VM to test something, share host directories into a VM (virtiofs `--mount`), provision a VM with setup scripts (`--script`), run a multi-distro test matrix, script VM lifecycles with JSON/jq, or debug a failed VM create (lease/SSH timeouts, image download/verification, script failures).
 compatibility: Requires an x86_64 KVM host with libvirt, virt-install >= 4.1, uv. Run from the repo as `uv run virt-runner ...`, or `virt-runner ...` when installed.
 ---
 
@@ -59,6 +59,10 @@ If absent, an ed25519 keypair without passphrase is generated automatically. A c
 Quick manual fixes: `virsh pool-start vm-pool && virsh net-start default`.
 
 ## Commands
+
+Short aliases work everywhere: `c` = `create`, `d` = `destroy`, `ls` = `list`, `s` = `ssh`.
+Identical behaviour, flags and exit codes; the JSON `tool` id stays canonical (`vm-create`,
+not `vm-c`). Use the full names in anything you write to disk so the command stays greppable.
 
 ### create NAME
 

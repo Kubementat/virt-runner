@@ -542,6 +542,22 @@ def main() -> None:
     assert res.exit_code == 0, res.output
     assert res.output.strip() == f"virt-runner, version {version('virt-runner')}"
 
+    # Short aliases (c/d/ls/s) dispatch to the canonical command, help still
+    # lists each command once, and a non-alias name is still a usage error.
+    from virt_runner.cli import ALIASES
+
+    assert ALIASES == {"c": "create", "d": "destroy", "ls": "list", "s": "ssh"}
+    for alias, canonical in ALIASES.items():
+        assert (
+            cli_main.get_command(None, alias) is cli_main.get_command(None, canonical)
+        ), alias
+    res = CliRunner().invoke(cli_main, ["ls", "--help"])
+    assert res.exit_code == 0 and "User name shown" in res.output, res.output
+    assert res.output.count("Options:") == 1
+    for bad in ("l", "lst", "creat"):
+        res = CliRunner().invoke(cli_main, [bad])
+        assert res.exit_code == 2, (bad, res.output)
+
     print("unit checks ok")
 
 

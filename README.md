@@ -61,6 +61,9 @@ All four accept `--json`: stdout carries **exactly one** JSON document (success 
 envelope), everything else goes to stderr. `VM_JSON_TRACE=1` re-sends progress lines to
 stderr for debugging. Envelope and error codes: [JSON output](#json-output).
 
+Short aliases for the same commands: `c` = `create`, `d` = `destroy`, `ls` = `list`, `s` = `ssh`
+(identical flags, exit codes and JSON `tool` ids).
+
 ```bash
 uv run virt-runner create myvm --json | jq -r .vm.ssh_command
 ```

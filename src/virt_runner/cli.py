@@ -7,6 +7,8 @@ Usage:
     uv run virt-runner ssh <VM_NAME> [--json]
     uv run virt-runner --version
 
+Short aliases: ``c`` = create, ``d`` = destroy, ``ls`` = list, ``s`` = ssh.
+
 ``--json`` (all subcommands) makes stdout carry exactly one JSON document and
 prints nothing else; see :mod:`virt_runner.output` and spec §5.
 
@@ -22,11 +24,28 @@ from virt_runner.cmd_destroy import cmd_destroy
 from virt_runner.cmd_list import cmd_list
 from virt_runner.cmd_ssh import cmd_ssh
 
+#: Short forms accepted instead of the full subcommand name.
+ALIASES = {"c": "create", "d": "destroy", "ls": "list", "s": "ssh"}
 
-@click.group()
+
+class AliasGroup(click.Group):
+    """Group that also dispatches on :data:`ALIASES`.
+
+    Only name *lookup* is aliased: ``--help`` still lists every command once,
+    and the JSON envelope keeps reporting the canonical ``tool`` id.
+    """
+
+    def get_command(self, ctx: click.Context, cmd_name: str):
+        return super().get_command(ctx, ALIASES.get(cmd_name, cmd_name))
+
+
+@click.group(cls=AliasGroup)
 @click.version_option(package_name="virt-runner", prog_name="virt-runner")
 def main():
-    """virt-runner — one-command KVM VM creation (Ubuntu, Arch, Fedora) via libvirt + cloud-init."""
+    """virt-runner — one-command KVM VM creation (Ubuntu, Arch, Fedora) via libvirt + cloud-init.
+
+    Short aliases: c=create, d=destroy, ls=list, s=ssh.
+    """
 
 
 main.add_command(cmd_create, "create")
