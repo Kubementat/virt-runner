@@ -369,7 +369,8 @@ class Virtualizer:
         """
         if not _spawn(["virsh", "list"]).returncode == 0:
             raise VirtError(
-                "preflight failed: libvirt not reachable ('virsh list' failed)",
+                "preflight failed: libvirt not reachable ('virsh list' failed) "
+                "— run 'virt-runner setup --check', then log out and back in",
                 "libvirt-unreachable",
             )
 
@@ -381,7 +382,8 @@ class Virtualizer:
         listing = _stdout(["virsh", "pool-list", "--all"])
         if not self._table_has(listing, self.POOL):
             raise VirtError(
-                f"preflight failed: storage pool '{self.POOL}' not found",
+                f"preflight failed: storage pool '{self.POOL}' not found "
+                "— run 'virt-runner setup' to define and start it",
                 "pool-not-found",
             )
 
@@ -429,7 +431,7 @@ class Virtualizer:
         if not os.access(self.VIRTIOFSD, os.X_OK):
             raise VirtError(
                 f"preflight failed: {self.VIRTIOFSD} not found (needed by --mount) "
-                "— install the 'virtiofsd' package",
+                "— install the 'virtiofsd' package or run 'virt-runner setup'",
                 "virtiofsd-missing",
                 "preflight",
             )

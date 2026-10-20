@@ -310,7 +310,7 @@ if [[ "${CHECK_ONLY}" == true ]]; then
 fi
 
 [[ -f /etc/debian_version ]] \
-  || error "Not a Debian/Ubuntu host — install the package list in --help with your distro's package manager"
+  || error "Not a Debian/Ubuntu host — install the packages listed under 'Install' in README.md with your distro's package manager, then define the pool and network (see the same section)"
 command -v apt-get >/dev/null 2>&1 || error "apt-get not found"
 
 if [[ -c /dev/kvm ]]; then

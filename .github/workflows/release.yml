@@ -1,0 +1,71 @@
+# Release: build the sdist + wheel, publish to PyPI, and publish a GitHub release.
+#
+# Triggered by pushing an annotated `vX.Y.Z` tag (the project's release unit — see
+# CONTRIBUTING.md). A tag that does not match `pyproject.toml`'s `version` aborts.
+#
+# One-time maintainer setup (required before the first successful run):
+#
+#   1. Have the `virt-runner` name registered on PyPI for the publishing account.
+#   2. On PyPI: virt-runner project -> Settings -> "Trusted Publisher" -> GitHub.
+#      Repository:   Kubementat/virt-runner  (or your org/repo)
+#      Workflow name: `release.yml`
+#      Environment:  leave empty (this job declares none)
+#      No API token is stored in the repository; the action exchanges a JWT.
+#   3. If PyPI rejects the upload, do NOT reuse the version: yank the release and
+#      tag the next one.
+#
+# A published version is immutable. If publishing fails after the tag exists, fix
+# the packaging and push a new tag — the GitHub release step is idempotent.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Assert tag matches the package version
+        run: |
+          ver=$(uv run python -c 'import tomllib,pathlib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          if [ "${GITHUB_REF_NAME#v}" != "$ver" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match pyproject.toml version $ver"
+            exit 1
+          fi
+
+      - name: Unit tests
+        run: uv run tests/unit_test.py
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          verbose: true
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --generate-notes \
+              --title "virt-runner ${GITHUB_REF_NAME#v}"
+          fi

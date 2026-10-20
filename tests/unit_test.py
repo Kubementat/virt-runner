@@ -548,8 +548,8 @@ def main() -> None:
 
     assert ALIASES == {"c": "create", "d": "destroy", "ls": "list", "s": "ssh"}
     for alias, canonical in ALIASES.items():
-        assert (
-            cli_main.get_command(None, alias) is cli_main.get_command(None, canonical)
+        assert cli_main.get_command(None, alias) is cli_main.get_command(
+            None, canonical
         ), alias
     res = CliRunner().invoke(cli_main, ["ls", "--help"])
     assert res.exit_code == 0 and "User name shown" in res.output, res.output
@@ -557,6 +557,23 @@ def main() -> None:
     for bad in ("l", "lst", "creat"):
         res = CliRunner().invoke(cli_main, [bad])
         assert res.exit_code == 2, (bad, res.output)
+
+    # `setup` runs the bundled host installer. In a checkout the path resolves to
+    # the repository root; in a wheel it resolves inside the package. Either way
+    # it must be the real script, and the command must never execute it here.
+    from virt_runner.cmd_setup import SCRIPT_NAME, prerequisite_script
+
+    script = prerequisite_script()
+    assert script is not None and script.is_file(), "installer script not found"
+    assert script.name == SCRIPT_NAME
+    assert "--check" in script.read_text(), "wrong installer script resolved"
+
+    res = CliRunner().invoke(cli_main, ["setup", "--help"])
+    assert res.exit_code == 0, res.output
+    assert "--with-virt-manager" in res.output
+    # Registered as a command, but deliberately not a VM command and not aliased.
+    assert cli_main.get_command(None, "setup") is not None
+    assert "setup" not in ALIASES
 
     print("unit checks ok")
 

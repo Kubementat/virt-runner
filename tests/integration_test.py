@@ -122,6 +122,16 @@ def main() -> None:
         f"--version prints the version, got {proc.stdout!r}",
     )
 
+    # 0. `setup --help` works without libvirt: the subcommand exists and the
+    # bundled installer is reachable (its flags are printed). No host changes.
+    proc = subprocess.run(
+        ["virt-runner", "setup", "--help"], capture_output=True, text=True, check=False
+    )
+    check(
+        proc.returncode == 0 and "--with-virt-manager" in proc.stdout,
+        f"setup --help documents the installer flags, got rc {proc.returncode}",
+    )
+
     # 0. Negative checks (no VMs created).
     doc, rc = virt_runner("create", "1bad", allow_fail=True)
     check(doc["status"] == "error", "create with an invalid name reports an error")

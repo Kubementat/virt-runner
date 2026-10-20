@@ -42,11 +42,14 @@ References (load when needed):
 One-time host setup (Ubuntu/Debian, apt, uses sudo internally, idempotent):
 
 ```bash
-./install-prerequisites.sh          # KVM, libvirt, virt-install, virtiofsd, groups,
-                                    # `default` NAT network + `vm-pool` dir pool (active+autostart)
-./install-prerequisites.sh --check  # audit only, changes nothing
+virt-runner setup --check  # audit only, changes nothing
+virt-runner setup          # KVM, libvirt, virt-install, virtiofsd, groups,
+                           # `default` NAT network + `vm-pool` dir pool (active+autostart)
 # then LOG OUT AND BACK IN (libvirt/kvm group membership)
 ```
+`setup` runs the installer script bundled in the wheel (`virt_runner/resources/`); a checkout also
+has `./install-prerequisites.sh` at the repository root. Needs sudo, idempotent, and is the only
+subcommand that does. Flags: `--check`, `--with-virt-manager`; it takes no `--json` and has no alias.
 
 `create` preflight checks (stage `preflight`): `virsh` reaches libvirtd without sudo, host is
 x86_64, storage pool `vm-pool` defined and active, network `default` active, the VM name is not
@@ -108,6 +111,14 @@ output goes to stderr and a summary document is printed at the end.
 `NAME_vda.qcow2` from `vm-pool`. Already-absent volume is only a warning. A **missing domain is
 an error** (`vm-not-defined`, exit 1) — treat that code as "already gone" for idempotent cleanup.
 Never touches `--mount` host directories or the image cache.
+
+### setup
+
+`virt-runner setup [--check] [--with-virt-manager]` — runs the host installer (bundled inside the
+wheel). Not a VM command: no `--json`, no alias, and the only subcommand that needs sudo. Use
+`--check` first — it changes nothing and needs no sudo — and report to the user that a re-login is
+required after a real run. On non-Debian hosts it fails fast; then install the packages named in
+`README.md` by hand.
 
 ## Shared directories (`--mount`)
 

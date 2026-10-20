@@ -5,9 +5,14 @@ Usage:
     uv run virt-runner destroy <NAME> [--json]
     uv run virt-runner list [OPTIONS] [--json]
     uv run virt-runner ssh <VM_NAME> [--json]
+    uv run virt-runner setup [--check] [--with-virt-manager]
     uv run virt-runner --version
 
 Short aliases: ``c`` = create, ``d`` = destroy, ``ls`` = list, ``s`` = ssh.
+
+``setup`` is the odd one out: it is not a VM command, it is not covered by the
+``--json`` contract, and it is the only subcommand that needs sudo (see
+:mod:`virt_runner.cmd_setup`).
 
 ``--json`` (all subcommands) makes stdout carry exactly one JSON document and
 prints nothing else; see :mod:`virt_runner.output` and spec §5.
@@ -22,6 +27,7 @@ import click
 from virt_runner.cmd_create import cmd_create
 from virt_runner.cmd_destroy import cmd_destroy
 from virt_runner.cmd_list import cmd_list
+from virt_runner.cmd_setup import cmd_setup
 from virt_runner.cmd_ssh import cmd_ssh
 
 #: Short forms accepted instead of the full subcommand name.
@@ -44,7 +50,8 @@ class AliasGroup(click.Group):
 def main():
     """virt-runner — one-command KVM VM creation (Ubuntu, Arch, Fedora) via libvirt + cloud-init.
 
-    Short aliases: c=create, d=destroy, ls=list, s=ssh.
+    Short aliases: c=create, d=destroy, ls=list, s=ssh. Run `setup` once per host
+    to install and configure the KVM/libvirt prerequisites.
     """
 
 
@@ -52,6 +59,7 @@ main.add_command(cmd_create, "create")
 main.add_command(cmd_destroy, "destroy")
 main.add_command(cmd_list, "list")
 main.add_command(cmd_ssh, "ssh")
+main.add_command(cmd_setup, "setup")
 
 
 if __name__ == "__main__":
