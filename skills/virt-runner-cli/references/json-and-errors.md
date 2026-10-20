@@ -119,8 +119,8 @@ through a non-zero ssh exit code.
 |---|---|---|
 | `usage` | Invalid command line (flag, VM name, `--user`, `--mount`, `--script` file, `--script`+`--no-boot`, unsupported Arch release) | Fix arguments; see `--help` |
 | `runtime-error` | Uncaught failure without a specific code | Re-run with `VM_JSON_TRACE=1`, read the message |
-| `libvirt-unreachable` | `virsh` cannot talk to libvirtd | Not in `libvirt`/`kvm` groups in this shell → re-login; `./install-prerequisites.sh --check` |
-| `pool-not-found` | `vm-pool` not defined | `./install-prerequisites.sh` |
+| `libvirt-unreachable` | `virsh` cannot talk to libvirtd | Not in `libvirt`/`kvm` groups in this shell → re-login; `virt-runner setup --check` |
+| `pool-not-found` | `vm-pool` not defined | `virt-runner setup` |
 | `pool-not-active` | `vm-pool` not active | `virsh pool-start vm-pool` |
 | `pool-path-unknown` | Pool directory path not determinable | Inspect `virsh pool-dumpxml vm-pool` |
 | `network-not-active` | `default` network not active | `virsh net-start default` |
@@ -140,5 +140,5 @@ through a non-zero ssh exit code.
 | `volume-delete-failed` | `vol-delete` failed during teardown | `virsh vol-delete NAME_vda.qcow2 vm-pool` |
 | `lease-timeout` | No DHCP lease in 120 s | `virsh console NAME`; check `default` network; destroy the VM afterwards |
 | `ssh-timeout` | SSH round-trip failed for 90 s | `virsh console NAME`; check cloud-init; right key/user; destroy afterwards |
-| `virtiofsd-missing` | `--mount` but no `/usr/libexec/virtiofsd` | `sudo apt install virtiofsd` (or `./install-prerequisites.sh`) |
+| `virtiofsd-missing` | `--mount` but no `/usr/libexec/virtiofsd` | `sudo apt install virtiofsd` (or `virt-runner setup`) |
 | `script-failed` | A `--script` exited non-zero (VM kept) | `virt-runner ssh NAME`, fix and re-run, or destroy |

@@ -9,6 +9,14 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ### Added
 
+- **`virt-runner setup`** — a subcommand that runs the host-prerequisite installer without a
+  repository checkout, so `uv tool install virt-runner` / `uvx virt-runner` users get the same
+  one-time host setup as source installs. `install-prerequisites.sh` is now bundled into the wheel as
+  package data (`virt_runner/resources/`), so the script always matches the installed version; from a
+  checkout it falls back to the file in the repository root. Flags pass through to the script
+  (`--check`, `--with-virt-manager`), its environment variables still work, and its exit code is
+  returned. Deliberately outside the `--json` contract and unaliased: it is a privileged host
+  operation, not a VM command.
 - **MIT license** — `LICENSE`, Copyright (c) 2026 Julian Weber, declared in the package metadata
   (`license` + `license-files`), so `pip show virt-runner` and the PyPI page report it.
 - **Complete package metadata** — `readme`, `authors`, `keywords`, `classifiers`, and
@@ -39,6 +47,9 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
   `docs/architecture-diagrams/` remain the living reference material.
 - **`install-prerequisites.sh` on a non-Debian host** — the error no longer points at `--help` for a
   package list it does not print; it names the packages and the README section that describes them.
+- **Preflight messages that used to leave you guessing** (`libvirt-unreachable`,
+  `pool-not-found`, `virtiofsd-missing`) now name `virt-runner setup` as the fix, so a fresh
+  `uvx virt-runner` host no longer needs the README open to get past the first command.
 - `tests/unit_test.py` reformatted — pre-existing drift that the new `ruff format --check` gate
   catches. No test logic changed.
 

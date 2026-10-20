@@ -16,25 +16,44 @@ No libvirt bindings, no prompts, no sudo at run time.
 
 ## Install
 
-Installing the tool and preparing the host are two separate steps, because a Python package cannot
-install KVM, configure libvirt, or add you to a group. Do the host setup once per machine, then
-install the CLI however you like.
+Installing the tool and preparing the host are two steps, because a Python package cannot install
+KVM, configure libvirt, or add you to a group. Do them in this order — the first needs no
+privileges at all.
 
-### 1. Host prerequisites (once per machine, needs sudo)
+### 1. The tool
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Kubementat/virt-runner/main/install-prerequisites.sh \
-  -o /tmp/install-prerequisites.sh
-less /tmp/install-prerequisites.sh      # yes, read it — you are about to sudo it
-sudo bash /tmp/install-prerequisites.sh --check   # audit: what is missing?
-sudo bash /tmp/install-prerequisites.sh           # then LOG OUT AND BACK IN (groups)
+uv tool install virt-runner        # one time, then `virt-runner` is on PATH
+# ...or straight from the repository:
+uv tool install "virt-runner @ git+https://github.com/Kubementat/virt-runner.git"
 ```
 
-From a checkout, the same file is `./install-prerequisites.sh` in the repository root.
-It installs KVM, libvirt, `virt-install`, `virtiofsd`, defines/autostarts the `vm-pool` storage pool
-and the `default` network, and adds your user to the `libvirt` and `kvm` groups so `virsh` needs no
-sudo. It is idempotent. `--check` reports without changing anything; `--help` shows
-`VIRT_USERNAME` / `VIRT_POOL_NAME` / `VIRT_POOL_DIR` / `VIRT_NET_NAME` overrides.
+Every example below is written for the installed command. Working from a source checkout instead,
+run `uv sync` once and prefix the examples with `uv run` — everything else is identical.
+
+### 2. Host prerequisites (once per machine, needs sudo)
+
+```bash
+virt-runner setup --check   # audit: what is missing? changes nothing
+virt-runner setup           # install + configure, then LOG OUT AND BACK IN (groups)
+```
+
+`setup` runs the `install-prerequisites.sh` that is bundled inside the wheel — so the version always
+matches the tool you installed. It installs KVM, libvirt, `virt-install`, `virtiofsd`, `ovmf`,
+`xorriso`, `jq` and friends, defines/autostarts the `vm-pool` storage pool and the `default` network,
+and adds your user to the `libvirt` and `kvm` groups so `virsh` needs no sudo. It is idempotent,
+and `setup --help` shows its flags: `--check` audits, `--with-virt-manager` also installs the GUI.
+`VIRT_USERNAME` / `VIRT_POOL_NAME` / `VIRT_POOL_DIR` / `VIRT_NET_NAME` are read from the environment.
+
+Prefer to run the script yourself, or have no tool installed yet? It is also a plain bash file:
+
+```bash
+# from a checkout
+./install-prerequisites.sh --check
+# or fetch it, read it, then run it — you are about to sudo it
+curl -fsSL https://raw.githubusercontent.com/Kubementat/virt-runner/main/install-prerequisites.sh \
+  -o /tmp/ip.sh && less /tmp/ip.sh && sudo bash /tmp/ip.sh
+```
 
 **Host OS support:** the installer is Debian/Ubuntu only (`apt-get`). On other hosts, install the
 equivalents of: qemu with the KVM accelerator + `qemu-img`, `libvirtd` + `virsh`, `virt-install`,
@@ -44,28 +63,17 @@ autostarted, and add your user to the `libvirt` and `kvm` groups. The tool's pre
 whether you got it right. Guest distros are unrelated: you can run Arch or Fedora guests on an
 Ubuntu host.
 
-### 2. The tool
+### One-liner without installation
 
-```bash
-uv tool install virt-runner        # one time, then `virt-runner` is on PATH
-# ...or for a single run with nothing installed:
-uvx virt-runner create myvm
-# ...or straight from the repository:
-uv tool install "virt-runner @ git+https://github.com/Kubementat/virt-runner.git"
-```
-
-Every example below is written for the installed command. Working from a source checkout instead,
-run `uv sync` once and prefix the examples with `uv run` — everything else is identical.
-
-`virt-runner` itself needs `virsh`, `virt-install`, `curl`, and `ssh` on `PATH`, a `vm-pool` storage
-pool, an active `default` network, and Python ≥ 3.10. `virtiofsd` is needed only for `--mount`.
-All of it comes from the step above; the preflight reports anything missing with an explicit error
-code before it touches your VM.
+`uvx virt-runner create myvm` runs the tool ephemerally, but it still needs a prepared host — run
+`uvx virt-runner setup` first if `--check` has not been done. Python ≥ 3.10 and `curl`, `ssh`,
+`virsh`, `virt-install` on `PATH`; `virtiofsd` only for `--mount`. Anything missing is reported by
+the preflight with an explicit error code before your VM is touched.
 
 ## Quick start
 
 ```bash
-# 0. Host setup — once per machine, see [Install](#install)
+# 0. Host setup — once per machine: `virt-runner setup` (see [Install](#install))
 
 # 1. Create a VM (~2 min cold, ~20 s on a warm image cache)
 virt-runner create myvm
@@ -89,26 +97,30 @@ sudo, an active `vm-pool` storage pool and `default` network, and `virt-install`
 ## Commands
 
 ```bash
-virt-runner create NAME   # build + boot; --distro (ubuntu|arch|fedora),
+virt-runner create NAME          # build + boot; --distro (ubuntu|arch|fedora),
                                  # --ram/--vcpu GiB/ count, --disk GiB,
                                  # --release (default per-distro), --image URL, --user,
                                  # --ssh-key, --mount HOST[:GUEST] (repeatable; virtiofs share),
                                  # --script FILE (repeatable; runs in the guest after boot),
                                  # --no-boot, --keep-going
-virt-runner destroy NAME  # undefine + delete disk (idempotent)
-virt-runner list          # only VMs whose disk lives in vm-pool
-virt-runner ssh NAME      # interactive shell (resolves IP, uses the injected key;
+virt-runner destroy NAME         # undefine + delete disk (idempotent)
+virt-runner list                 # only VMs whose disk lives in vm-pool
+virt-runner ssh NAME             # interactive shell (resolves IP, uses the injected key;
                                  # picks up the user recorded at create, --user to override)
+virt-runner setup [--check]      # host prerequisites — the bundled installer
+                                 # (--with-virt-manager also installs the GUI)
 ```
 
 Cached `latest`/`current` images are never refreshed — delete
 `~/vm-images/<distro>/<release>/` to pick up a newer build.
 
-All four accept `--json`: stdout carries **exactly one** JSON document (success *or* error
-envelope), everything else goes to stderr. `VM_JSON_TRACE=1` re-sends progress lines to
+All four VM commands accept `--json`: stdout carries **exactly one** JSON document (success *or*
+error envelope), everything else goes to stderr. `VM_JSON_TRACE=1` re-sends progress lines to
 stderr for debugging. Envelope and error codes: [JSON output](#json-output).
 
-Short aliases for the same commands: `c` = `create`, `d` = `destroy`, `ls` = `list`, `s` = `ssh`
+`setup` has no alias and no `--json`: it is not a VM command, it is a privileged host operation.
+
+Short aliases for the VM commands: `c` = `create`, `d` = `destroy`, `ls` = `list`, `s` = `ssh`
 (identical flags, exit codes and JSON `tool` ids).
 
 ```bash
@@ -286,7 +298,7 @@ project's `.claude/skills/`).
 
 | Symptom | Fix |
 |---|---|
-| `libvirt not reachable` | Not in `libvirt`/`kvm` groups in this shell → re-login, then `sudo bash install-prerequisites.sh --check` (see [Install](#install)) |
+| `libvirt not reachable` | Not in `libvirt`/`kvm` groups in this shell → re-login, then `virt-runner setup --check` (see [Install](#install)) |
 | `pool 'vm-pool' is not active` / `network 'default' is not active` | `virsh pool-start vm-pool && virsh net-start default` |
 | `no DHCP lease after 120s` / `SSH … not reachable yet` | `virsh console NAME` (Ctrl-`]` to detach) to watch the guest; for SSH make sure you use the key the VM was given: `ssh -i ~/.ssh/virt_runner_key ubuntu@IP` (`virt-runner ssh NAME` picks up the right user automatically; for Arch that is `arch`, for Fedora that is `fedora`) |
 | `SHA256 mismatch` | Corrupt cache: delete `~/vm-images/<release>/` and retry |

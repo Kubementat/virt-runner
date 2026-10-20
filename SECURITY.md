@@ -45,7 +45,7 @@ before trusting it with anything beyond development and testing.
 | CLI arguments | VM name (`^[A-Za-z][A-Za-z0-9._-]*$`), `--user` (`[a-z_][a-z0-9_-]{0,31}`), and guest mount paths (`[A-Za-z0-9._-]`, no `.`/`..`) are validated by regex before they reach any YAML, XML, or argv (RCE/privilege-escalation surface closed at the boundary). The guest's `--user` has passwordless `sudo`; passing an unintended user is a guest-side privilege issue, not host-side. |
 | Subprocess execution | Everything is invoked with `subprocess.run` + `argv` lists, never a shell, so there is no `eval`-style surface. |
 | Network | `virt-runner` itself binds no ports. It talks to `libvirtd` over the local libvirt socket and to guests over the `default` NAT network. |
-| Privileges | It runs entirely as your user, but that user must be in the `libvirt` and `kvm` groups, which is effectively root-equivalent on the host (see below). `create`/`destroy`/`list`/`ssh` need no sudo; `install-prerequisites.sh` does. |
+| Privileges | It runs entirely as your user, but that user must be in the `libvirt` and `kvm` groups, which is effectively root-equivalent on the host (see below). `create`/`destroy`/`list`/`ssh` need no sudo; `setup` is the exception — its whole job is running the privileged host installer. |
 
 ## Threat model and accepted trade-offs
 

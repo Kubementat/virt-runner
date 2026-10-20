@@ -44,6 +44,7 @@ cmd_create.py   argument validation + the staged create workflow
 cmd_destroy.py  idempotent teardown
 cmd_list.py     pool-membership based listing
 cmd_ssh.py      interactive shell
+cmd_setup.py    thin wrapper around the bundled install-prerequisites.sh (no --json)
 args.py         --json plumbing, JSON-shaped usage errors
 output.py       one run-state dict rendered as text or JSON
 errors.py       VirtError(code, stage) — the single error type

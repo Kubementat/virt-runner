@@ -6,7 +6,7 @@ Distilled from `README.md` "Troubleshooting" and `docs/lessons-learned/`.
 
 | Symptom | Fix |
 |---|---|
-| `libvirt not reachable` | User not in `libvirt`/`kvm` groups in this shell → log out/in; `./install-prerequisites.sh --check` |
+| `libvirt not reachable` | User not in `libvirt`/`kvm` groups in this shell → log out/in; `virt-runner setup --check` |
 | `pool 'vm-pool' is not active` / `network 'default' is not active` | `virsh pool-start vm-pool && virsh net-start default` |
 | `no DHCP lease after 120s` / `SSH … not reachable yet` | `virsh console NAME` (Ctrl-`]` detaches) to watch boot. Manual ssh must use the injected key: `ssh -i ~/.ssh/virt_runner_key <user>@IP` (user `ubuntu`/`arch`/`fedora`); `virt-runner ssh NAME` picks it automatically |
 | `SHA256 mismatch` | Corrupt cache: delete the image's cache dir (below) and retry |
@@ -66,7 +66,7 @@ Root `~/vm-images` (override `VM_CREATE_CACHE_DIR`):
 - Env overrides: `VM_CREATE_CACHE_DIR`, `VM_CREATE_LEASE_FILE` / `VM_<CMD>_LEASE_FILE` (default
   `/var/lib/libvirt/dnsmasq/virbr0.status`), `VM_JSON_TRACE`.
 
-## Host setup details (`install-prerequisites.sh`)
+## Host setup details (`virt-runner setup`)
 
 Ubuntu/Debian only (apt). Installs KVM/libvirt/virt-install/virtiofsd, adds the user
 (`VIRT_USERNAME`, default `$SUDO_USER`/`$USER`) to `libvirt` and `kvm`, defines+starts+autostarts
