@@ -1,5 +1,8 @@
 # virt-runner
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![CI](https://github.com/Kubementat/virt-runner/actions/workflows/ci.yml/badge.svg)
+
 **One command to a running, SSH-reachable Ubuntu, Arch, or Fedora KVM guest — via libvirt + cloud-init.**
 
 `virt-runner create myvm` downloads (once, then caches) and verifies an Ubuntu cloud image,
@@ -11,46 +14,90 @@ straight into a shell on the VM. Every command also speaks JSON via `--json`.
 Python (stdlib + `click`); all host interaction via `virsh`, `virt-install`, `curl`, `ssh`.
 No libvirt bindings, no prompts, no sudo at run time.
 
+## Install
+
+Installing the tool and preparing the host are two separate steps, because a Python package cannot
+install KVM, configure libvirt, or add you to a group. Do the host setup once per machine, then
+install the CLI however you like.
+
+### 1. Host prerequisites (once per machine, needs sudo)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Kubementat/virt-runner/main/install-prerequisites.sh \
+  -o /tmp/install-prerequisites.sh
+less /tmp/install-prerequisites.sh      # yes, read it — you are about to sudo it
+sudo bash /tmp/install-prerequisites.sh --check   # audit: what is missing?
+sudo bash /tmp/install-prerequisites.sh           # then LOG OUT AND BACK IN (groups)
+```
+
+From a checkout, the same file is `./install-prerequisites.sh` in the repository root.
+It installs KVM, libvirt, `virt-install`, `virtiofsd`, defines/autostarts the `vm-pool` storage pool
+and the `default` network, and adds your user to the `libvirt` and `kvm` groups so `virsh` needs no
+sudo. It is idempotent. `--check` reports without changing anything; `--help` shows
+`VIRT_USERNAME` / `VIRT_POOL_NAME` / `VIRT_POOL_DIR` / `VIRT_NET_NAME` overrides.
+
+**Host OS support:** the installer is Debian/Ubuntu only (`apt-get`). On other hosts, install the
+equivalents of: qemu with the KVM accelerator + `qemu-img`, `libvirtd` + `virsh`, `virt-install`,
+`virtiofsd`, UEFI/`ovmf` firmware, `xorrisofs`, `uuidgen`, `ssh`, `curl`, `jq`, and `cpu-checker`
+(`kvm-ok`) — then create the `vm-pool` dir pool and the `default` NAT network yourself, active and
+autostarted, and add your user to the `libvirt` and `kvm` groups. The tool's preflight then confirms
+whether you got it right. Guest distros are unrelated: you can run Arch or Fedora guests on an
+Ubuntu host.
+
+### 2. The tool
+
+```bash
+uv tool install virt-runner        # one time, then `virt-runner` is on PATH
+# ...or for a single run with nothing installed:
+uvx virt-runner create myvm
+# ...or straight from the repository:
+uv tool install "virt-runner @ git+https://github.com/Kubementat/virt-runner.git"
+```
+
+Every example below is written for the installed command. Working from a source checkout instead,
+run `uv sync` once and prefix the examples with `uv run` — everything else is identical.
+
+`virt-runner` itself needs `virsh`, `virt-install`, `curl`, and `ssh` on `PATH`, a `vm-pool` storage
+pool, an active `default` network, and Python ≥ 3.10. `virtiofsd` is needed only for `--mount`.
+All of it comes from the step above; the preflight reports anything missing with an explicit error
+code before it touches your VM.
+
 ## Quick start
 
 ```bash
-# 0. One-time host setup (KVM, libvirt, groups, vm-pool, default network; re-runnable)
-./install-prerequisites.sh      # then LOG OUT AND BACK IN (group membership)
+# 0. Host setup — once per machine, see [Install](#install)
 
 # 1. Create a VM (~2 min cold, ~20 s on a warm image cache)
-uv run virt-runner create myvm
+virt-runner create myvm
 
 #    ...or an Arch Linux guest (official arch-boxes cloud image, user `arch`)
-uv run virt-runner create myvm --distro arch
+virt-runner create myvm --distro arch
 
 #    ...or a Fedora guest (Fedora Cloud Base, user `fedora`)
-uv run virt-runner create myvm --distro fedora
+virt-runner create myvm --distro fedora
 
 # 2. SSH in
-uv run virt-runner ssh myvm
+virt-runner ssh myvm
 
 # 3. Done
-uv run virt-runner destroy myvm
+virt-runner destroy myvm
 ```
 
-Requirements: KVM host with `virsh` usable without sudo, active `vm-pool` storage pool and
-`default` network, `virt-install` ≥ 4.1, Python ≥ 3.10 with [`uv`](https://docs.astral.sh/uv/).
-`install-prerequisites.sh` sets all of it up; `--check` audits only. The tool's preflight
-reports any missing piece with an explicit error. `virtiofsd` (only needed for `--mount`)
-is also installed by `install-prerequisites.sh`.
+Requirements: the host setup from [Install](#install) — a KVM host where `virsh` works without
+sudo, an active `vm-pool` storage pool and `default` network, and `virt-install` ≥ 4.1.
 
 ## Commands
 
 ```bash
-uv run virt-runner create NAME   # build + boot; --distro (ubuntu|arch|fedora),
+virt-runner create NAME   # build + boot; --distro (ubuntu|arch|fedora),
                                  # --ram/--vcpu GiB/ count, --disk GiB,
                                  # --release (default per-distro), --image URL, --user,
                                  # --ssh-key, --mount HOST[:GUEST] (repeatable; virtiofs share),
                                  # --script FILE (repeatable; runs in the guest after boot),
                                  # --no-boot, --keep-going
-uv run virt-runner destroy NAME  # undefine + delete disk (idempotent)
-uv run virt-runner list          # only VMs whose disk lives in vm-pool
-uv run virt-runner ssh NAME      # interactive shell (resolves IP, uses the injected key;
+virt-runner destroy NAME  # undefine + delete disk (idempotent)
+virt-runner list          # only VMs whose disk lives in vm-pool
+virt-runner ssh NAME      # interactive shell (resolves IP, uses the injected key;
                                  # picks up the user recorded at create, --user to override)
 ```
 
@@ -65,7 +112,7 @@ Short aliases for the same commands: `c` = `create`, `d` = `destroy`, `ls` = `li
 (identical flags, exit codes and JSON `tool` ids).
 
 ```bash
-uv run virt-runner create myvm --json | jq -r .vm.ssh_command
+virt-runner create myvm --json | jq -r .vm.ssh_command
 ```
 
 ## JSON output
@@ -162,7 +209,7 @@ in the given order and the first non-zero exit stops the run.
   for debugging via `virt-runner ssh NAME`. `--script` with `--no-boot` is a usage error.
 
 ```bash
-uv run virt-runner create dev --script setup.sh --script configure.py
+virt-runner create dev --script setup.sh --script configure.py
 ```
 
 ## Integration test
@@ -205,7 +252,27 @@ disabled (Fedora's aarch64 image ships an unsigned GRUB — the Secure Boot firm
 build rejects it with a silent `Security Violation` dialog: no kernel, no lease, an
 empty `virsh console`).
 
-Read next: [`docs/e2e-acceptance.md`](docs/e2e-acceptance.md).
+Read next: [`docs/`](docs/README.md) — architecture diagrams, lessons learned, and the
+[contributing guide](CONTRIBUTING.md).
+
+## Releases
+
+Releases are tag-based: an annotated `vX.Y.Z` tag, a changelog section, and a version bump in the
+same commit, then published to PyPI by
+[`release.yml`](.github/workflows/release.yml). The current release is whatever
+`virt-runner --version` reports; see [CHANGELOG.md](CHANGELOG.md) for what changed.
+
+Semver maps onto what you can observe: a **major** release breaks the CLI or the `--json` contract,
+a **minor** release adds a flag, subcommand, error code, or JSON key, and a **patch** release only
+fixes things. Breaking changes therefore land on a major version only.
+
+## Contributing & support
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, the two test suites, branch model, releases.
+- [SECURITY.md](SECURITY.md) — how to report a vulnerability, and which security trade-offs the tool
+  makes deliberately (host-key checking, image verification, shared keys, `--mount`).
+- Issues: https://github.com/Kubementat/virt-runner/issues
+- License: [MIT](LICENSE), Copyright (c) 2026 Julian Weber.
 
 ## Agent skill
 
@@ -219,7 +286,7 @@ project's `.claude/skills/`).
 
 | Symptom | Fix |
 |---|---|
-| `libvirt not reachable` | Not in `libvirt`/`kvm` groups in this shell → re-login; `./install-prerequisites.sh --check` |
+| `libvirt not reachable` | Not in `libvirt`/`kvm` groups in this shell → re-login, then `sudo bash install-prerequisites.sh --check` (see [Install](#install)) |
 | `pool 'vm-pool' is not active` / `network 'default' is not active` | `virsh pool-start vm-pool && virsh net-start default` |
 | `no DHCP lease after 120s` / `SSH … not reachable yet` | `virsh console NAME` (Ctrl-`]` to detach) to watch the guest; for SSH make sure you use the key the VM was given: `ssh -i ~/.ssh/virt_runner_key ubuntu@IP` (`virt-runner ssh NAME` picks up the right user automatically; for Arch that is `arch`, for Fedora that is `fedora`) |
 | `SHA256 mismatch` | Corrupt cache: delete `~/vm-images/<release>/` and retry |
