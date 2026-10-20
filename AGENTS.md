@@ -31,6 +31,11 @@ Release checklist:
 5. Fast-forward `main` to that commit (`git branch -f main develop` — avoids churning the
    checked-out worktree), then push both remotes with tags:
    `git push forgejo main develop --follow-tags && git push github main develop --follow-tags`.
+6. The tag push to **GitHub** runs `.github/workflows/release.yml`, which builds sdist + wheel,
+   verifies tag == `pyproject.toml` version, publishes to PyPI (trusted publishing, no token in the
+   repo), and attaches the artifacts to the GitHub release. Watch the Actions run; a tag whose
+   version does not match, or a PyPI name/ownership problem, fails the job — and since the tag is
+   already out, the fix is a new tag, never a re-used version. Full detail: `CONTRIBUTING.md`.
 
 The first tag is `v0.4.0`; `v0.1.0`-`v0.3.0` were bump-only commits without a tag, so for
 those the changelog headings are the only record.
