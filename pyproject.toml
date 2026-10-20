@@ -55,6 +55,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/virt_runner"]
 
+# The host installer is not Python, so it gets shipped as package data instead:
+# `virt-runner setup` execs this copy, which keeps its version pinned to the
+# wheel it came in (importlib.resources, see virt_runner/cmd_setup.py).
+[tool.hatch.build.targets.wheel.force-include]
+"install-prerequisites.sh" = "virt_runner/resources/install-prerequisites.sh"
+
 # sdist: the whole testable tree, so `pip install /sdist.tar.gz && pytest tests`
 # works from a source archive. The wheel stays lean (package only).
 [tool.hatch.build.targets.sdist]
