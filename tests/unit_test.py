@@ -548,8 +548,8 @@ def main() -> None:
 
     assert ALIASES == {"c": "create", "d": "destroy", "ls": "list", "s": "ssh"}
     for alias, canonical in ALIASES.items():
-        assert (
-            cli_main.get_command(None, alias) is cli_main.get_command(None, canonical)
+        assert cli_main.get_command(None, alias) is cli_main.get_command(
+            None, canonical
         ), alias
     res = CliRunner().invoke(cli_main, ["ls", "--help"])
     assert res.exit_code == 0 and "User name shown" in res.output, res.output
