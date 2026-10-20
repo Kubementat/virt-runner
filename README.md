@@ -1,7 +1,6 @@
 # virt-runner
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-![CI](https://github.com/Kubementat/virt-runner/actions/workflows/ci.yml/badge.svg)
 
 **One command to a running, SSH-reachable Ubuntu, Arch, or Fedora KVM guest — via libvirt + cloud-init.**
 
@@ -250,6 +249,10 @@ uv run ruff format .    # format (line length 88, target py310)
 uv run tests/unit_test.py    # pure-logic checks (seconds, no KVM)
 ```
 
+`./scripts/check.sh` runs all of that plus a CLI smoke test, the package builds, and `shellcheck`
+(`--all` adds the Python 3.10 floor). Run it before you push and before you tag — nothing else
+checks your work for you.
+
 Layout: `cli → cmd_* → virtualizer → core (output, errors)`. Only
 [`src/virt_runner/virtualizer.py`](src/virt_runner/virtualizer.py) touches the host; text and
 JSON render from one run-state dict. Exit codes: `0` success, `1` runtime, `2` usage — with
@@ -270,9 +273,9 @@ Read next: [`docs/`](docs/README.md) — architecture diagrams, lessons learned,
 ## Releases
 
 Releases are tag-based: an annotated `vX.Y.Z` tag, a changelog section, and a version bump in the
-same commit, then published to PyPI by
-[`release.yml`](.github/workflows/release.yml). The current release is whatever
-`virt-runner --version` reports; see [CHANGELOG.md](CHANGELOG.md) for what changed.
+same commit. Nothing is automated: `./scripts/check.sh` is the gate, and the upload is a
+`uv publish` you run yourself. The current release is whatever `virt-runner --version` reports; see
+[CHANGELOG.md](CHANGELOG.md) for what changed.
 
 Semver maps onto what you can observe: a **major** release breaks the CLI or the `--json` contract,
 a **minor** release adds a flag, subcommand, error code, or JSON key, and a **patch** release only

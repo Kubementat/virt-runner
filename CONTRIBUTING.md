@@ -73,8 +73,9 @@ testable. If your change needs a new subprocess call, it belongs there.
    `skills/virt-runner-cli/` if the behaviour an agent needs changed.
 5. Add a `## [Unreleased]` entry to `CHANGELOG.md` in [Keep a Changelog](https://keepachangelog.com/)
    form, using the same wording you will keep for the release.
-6. Open a pull request against `develop`. CI runs lint and the unit suite on every push; the
-   integration suite is run by a maintainer (it needs real KVM).
+6. Run `./scripts/check.sh` (lint, format, unit tests, CLI, builds, `shellcheck`) and open a pull
+   request against `develop`. Nothing checks your work for you — there is no CI. The integration
+   suite is run by whoever touched it, because it needs real KVM.
 
 ### Code style
 
@@ -111,18 +112,20 @@ Never run it on a machine with VMs you care about.
 
 ## Releases
 
-Releases are tag-based, and a version is not a release until its tag exists. The full checklist lives
-in [the release section of the README](README.md#releases) and is automated by
-[`.github/workflows/release.yml`](.github/workflows/release.yml) once a tag is pushed; the manual
-steps matter because CI cannot make the decisions for you:
+Releases are tag-based, and a version is not a release until its tag exists. Nothing is automated
+and nothing needs to be: the checklist in
+[the release section of the README](README.md#releases) is run by a human, on a machine that has
+both test suites available.
 
-1. Both suites green on the candidate tree.
+1. `./scripts/check.sh --all` and `uv run tests/integration_test.py` green on the candidate tree.
 2. Fold `## [Unreleased]` into `## [X.Y.Z] - YYYY-MM-DD`, leaving `## [Unreleased]` with
    `_No unreleased changes at present._`.
 3. Bump `version` in `pyproject.toml`, then `uv sync` (writes `uv.lock`; `--version` and the JSON
    `version` field read the installed metadata, so no other file needs the number).
-4. Commit on `develop`, tag it (`git tag -a vX.Y.Z -m "release vX.Y.Z"`), fast-forward `main` to that
-   commit, and push both.
+4. Confirm the tag matches the tree: `grep -m1 '^version = ' pyproject.toml` must equal
+   `git describe --tags` without the leading `v`. Then commit on `develop`, tag it
+   (`git tag -a vX.Y.Z -m "release vX.Y.Z"`), fast-forward `main` to that commit, and push both.
+5. Publish: `uv build` then `uv publish` (see below).
 
 Semver maps directly onto what a user can observe: **MAJOR** breaks the CLI or JSON contract,
 **MINOR** adds a flag, subcommand, error code, or JSON key, **PATCH** is fixes only. The first tagged
@@ -131,15 +134,26 @@ only record for them.
 
 ### Publishing to PyPI
 
-A tagged release is published to PyPI by [`release.yml`](.github/workflows/release.yml) using trusted
-publishing (no API token stored in the repo). Maintainers need to configure the trusted publisher on
-PyPI once, and the project name `virt-runner` must be registered: see the workflow file's header
-comment. If publishing fails, the fix is a new tag — `yank` the bad release on PyPI and never re-use
-a version number.
+From a clean tree, on the tagged commit:
+
+```bash
+uv build                          # dist/virt_runner-<ver>.tar.gz + .whl
+uv publish                        # uploads dist/*, reads the token from your environment
+```
+
+The token belongs in your local environment (`UV_PUBLISH_TOKEN`), never in the repository and never
+in a git remote. `uv publish` refuses to overwrite an existing version, and a published version is
+immutable: if the upload fails or the wrong tree got tagged, `yank` the release on PyPI and publish
+the next version. Do not delete tags that were pushed.
+
+Two manual checks worth the thirty seconds before you upload, because nothing enforces them: that the
+tag's version equals `pyproject.toml`'s, and that `uv run virt-runner --version` on the tagged tree
+prints that same version.
 
 ## Pull request expectations
 
-- CI green, and the integration suite mentioned in the PR description (either run, or why not).
+- `./scripts/check.sh` green, and the integration suite mentioned in the PR description (either run,
+  or why not).
 - Every user-visible change has a changelog entry and a doc update.
 - A new error code appears in `README.md`, `SECURITY.md` if it is security-relevant, and the skill's
   `references/json-and-errors.md`.

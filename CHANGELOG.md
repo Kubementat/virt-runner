@@ -7,6 +7,13 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ## [Unreleased]
 
+_No unreleased changes at present._
+
+## [0.5.0] - 2026-10-20
+
+> First release intended for PyPI: `uv tool install virt-runner` / `uvx virt-runner` work from here
+> on, with `virt-runner setup` covering the host side.
+
 ### Added
 
 - **`virt-runner setup`** — a subcommand that runs the host-prerequisite installer without a
@@ -22,13 +29,11 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 - **Complete package metadata** — `readme`, `authors`, `keywords`, `classifiers`, and
   `[project.urls]` (homepage/repository/issues/changelog). Before this, a published wheel carried an
   empty project description.
-- **PyPI publishing** — `.github/workflows/release.yml` builds the sdist + wheel on a `vX.Y.Z` tag,
-  checks that the tag matches `pyproject.toml`, publishes with trusted publishing (no token in the
-  repository), and attaches the artifacts to the GitHub release. `uv tool install virt-runner` and
-  `uvx virt-runner` work once the first release is published.
-- **CI** — `.github/workflows/ci.yml`: `ruff check`, `ruff format --check`, the pure-logic unit
-  suite, a CLI smoke test, a wheel/sdist build, and `shellcheck` for `install-prerequisites.sh`.
-  Runs on Python 3.10 and 3.13. The integration suite stays local: it needs real KVM.
+- **`./scripts/check.sh`** — the local gate that stands in for CI: `uv sync --frozen`, lint, format
+  check, unit tests, a CLI smoke test, `uv build`, and `shellcheck` for the installer (`--all` adds
+  the Python 3.10 floor). Releases stay manual — `uv build` then `uv publish` from the tagged commit
+  — because this project deliberately has no CI and no publish pipeline. `uv tool install
+  virt-runner` and `uvx virt-runner` work once the first release is published.
 - **`SECURITY.md`** — disclosure policy and the documented, deliberate security trade-offs
   (SSH host-key checking disabled, best-effort image verification, one shared keypair per host,
   `--mount` grants the guest write access to your host directories, libvirt/kvm group membership).
@@ -52,6 +57,14 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
   `uvx virt-runner` host no longer needs the README open to get past the first command.
 - `tests/unit_test.py` reformatted — pre-existing drift that the new `ruff format --check` gate
   catches. No test logic changed.
+
+### Fixed
+
+- **The agent skill described the pre-aarch64 world.** `unsupported-arch` was documented as "host
+  not x86_64 … not fixable", so an agent on a supported aarch64 host would have told the user the
+  tool cannot help them, and `compatibility` still required x86_64 and `uv`. Both corrected, and
+  `image-arch-unavailable` — added in 0.4.0 but never added to the skill's error table — is now
+  there, so an agent can name the one ARM failure that is real.
 
 ## [0.4.0] - 2026-10-18
 

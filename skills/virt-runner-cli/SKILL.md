@@ -1,8 +1,8 @@
 ---
 name: virt-runner-cli
 description: |
-  Expert use of the `virt-runner` CLI: one command to a running, SSH-reachable Ubuntu, Arch or Fedora KVM guest via libvirt (qemu:///system) + cloud-init, with `create`, `destroy`, `list` and `ssh` subcommands (short aliases `c`, `d`, `ls`, `s`) and a stable `--json` contract. Use when the user mentions virt-runner, wants to create, provision, list, SSH into or destroy throwaway/test KVM or libvirt VMs, spin up a clean Ubuntu/Arch/Fedora VM to test something, share host directories into a VM (virtiofs `--mount`), provision a VM with setup scripts (`--script`), run a multi-distro test matrix, script VM lifecycles with JSON/jq, or debug a failed VM create (lease/SSH timeouts, image download/verification, script failures).
-compatibility: Requires an x86_64 KVM host with libvirt, virt-install >= 4.1, uv. Run from the repo as `uv run virt-runner ...`, or `virt-runner ...` when installed.
+  Expert use of the `virt-runner` CLI: one command to a running, SSH-reachable Ubuntu, Arch or Fedora KVM guest via libvirt (qemu:///system) + cloud-init, with `create`, `destroy`, `list` and `ssh` subcommands (short aliases `c`, `d`, `ls`, `s`), a `setup` subcommand for host prerequisites, and a stable `--json` contract for the VM commands. Use when the user mentions virt-runner, wants to create, provision, list, SSH into or destroy throwaway/test KVM or libvirt VMs, spin up a clean Ubuntu/Arch/Fedora VM to test something, share host directories into a VM (virtiofs `--mount`), provision a VM with setup scripts (`--script`), run a multi-distro test matrix, script VM lifecycles with JSON/jq, or debug a failed VM create (lease/SSH timeouts, image download/verification, script failures).
+compatibility: Requires a KVM host (x86_64 or aarch64) with libvirt, virt-install >= 4.1 and Python >= 3.10. Run as `virt-runner ...` when installed (`uv tool install virt-runner`), or `uv run virt-runner ...` from a checkout.
 ---
 
 # virt-runner CLI
@@ -52,7 +52,7 @@ has `./install-prerequisites.sh` at the repository root. Needs sudo, idempotent,
 subcommand that does. Flags: `--check`, `--with-virt-manager`; it takes no `--json` and has no alias.
 
 `create` preflight checks (stage `preflight`): `virsh` reaches libvirtd without sudo, host is
-x86_64, storage pool `vm-pool` defined and active, network `default` active, the VM name is not
+x86_64 or aarch64, storage pool `vm-pool` defined and active, network `default` active, the VM name is not
 already defined, `/usr/libexec/virtiofsd` exists (only with `--mount`), and an SSH key is usable.
 
 SSH key: default public key `~/.ssh/virt_runner_key.pub`; private key = same path without `.pub`.
@@ -245,7 +245,9 @@ More in `references/troubleshooting.md`.
 - `image.verification` is `sha256-sums` or `skipped` (no sums found / old cache without marker).
 - Fedora downloads go through mirrors; a stale mirror index can 404 — the tool falls back to the
   next-newest build automatically; a retry usually fixes `image-download-failed`.
-- Only x86_64 hosts and images.
+- Hosts are x86_64 or aarch64; the other archs fail with `unsupported-arch`. On aarch64
+  only Ubuntu and Fedora work — `--distro arch` fails with `image-arch-unavailable`, because
+  arch-boxes ships x86_64 images only.
 - `list` shows only VMs with a disk in `vm-pool`; VMs from other tools are invisible (and must not
   be touched).
 - Guest host keys change on every recreate and IPs are reused — always use

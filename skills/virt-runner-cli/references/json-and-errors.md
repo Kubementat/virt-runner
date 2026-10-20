@@ -124,7 +124,7 @@ through a non-zero ssh exit code.
 | `pool-not-active` | `vm-pool` not active | `virsh pool-start vm-pool` |
 | `pool-path-unknown` | Pool directory path not determinable | Inspect `virsh pool-dumpxml vm-pool` |
 | `network-not-active` | `default` network not active | `virsh net-start default` |
-| `unsupported-arch` | Host not x86_64 | Not fixable; images are x86_64 only |
+| `unsupported-arch` | Host arch is neither x86_64 nor aarch64 (ppc64le, s390x, riscv64) | Not fixable — run on an x86_64/aarch64 host |
 | `vm-already-defined` | Name taken | Choose another name, or destroy the old VM **only if it is yours** |
 | `vm-not-defined` | No such domain (destroy/ssh) | For cleanup: treat as "already gone" |
 | `vm-not-running` | Domain exists but stopped | `virsh start NAME` |
@@ -133,6 +133,7 @@ through a non-zero ssh exit code.
 | `image-download-failed` | Image or listing not fetchable | Network/mirror issue; retry (Fedora mirrors flap); or `--keep-going` if cached |
 | `image-verification-failed` | SHA256 mismatch / no checksum entry | Delete that cache dir and retry; for `--image`, ensure the same-dir `SHA256SUMS` lists the file |
 | `image-no-cache` | `--keep-going` but nothing cached | Fix the download first |
+| `image-arch-unavailable` | No profile image for the host arch (`--distro arch` on aarch64) | Use `--distro ubuntu`/`fedora` on aarch64, or run on x86_64 |
 | `cloud-init-failed` | Seed files could not be generated | Check tmp space / key file readability |
 | `volume-create-failed` / `volume-import-failed` / `volume-resize-failed` | `virsh vol-create-as` / `vol-upload` / `vol-resize` failed | Check pool space (`virsh pool-info vm-pool`); a leftover `NAME_vda.qcow2` → `virsh vol-delete NAME_vda.qcow2 vm-pool` |
 | `vm-create-failed` | `virt-install` failed (cleaned up) | Read message; with `--mount` check virtiofsd / shared memory |

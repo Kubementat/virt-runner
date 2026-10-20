@@ -22,7 +22,7 @@ PATCH = fixes only. Version lives in `pyproject.toml`; `uv sync` writes it to `u
 so no other file needs the number.
 
 Release checklist:
-1. Both suites green on the tree: `uv run tests/unit_test.py` + `uv run tests/integration_test.py`.
+1. `./scripts/check.sh --all` + `uv run tests/integration_test.py` green on the tree.
 2. Changelog: move the `## [Unreleased]` entries into `## [X.Y.Z] - YYYY-MM-DD`, leave
    `## [Unreleased]` with `_No unreleased changes at present._`. Reuse the wording written
    in the feature commits.
@@ -31,11 +31,11 @@ Release checklist:
 5. Fast-forward `main` to that commit (`git branch -f main develop` — avoids churning the
    checked-out worktree), then push both remotes with tags:
    `git push forgejo main develop --follow-tags && git push github main develop --follow-tags`.
-6. The tag push to **GitHub** runs `.github/workflows/release.yml`, which builds sdist + wheel,
-   verifies tag == `pyproject.toml` version, publishes to PyPI (trusted publishing, no token in the
-   repo), and attaches the artifacts to the GitHub release. Watch the Actions run; a tag whose
-   version does not match, or a PyPI name/ownership problem, fails the job — and since the tag is
-   already out, the fix is a new tag, never a re-used version. Full detail: `CONTRIBUTING.md`.
+6. Publish by hand from the tagged commit: `uv build`, then `uv publish` with the token in your
+   local environment (`UV_PUBLISH_TOKEN`) — never in the repo. Nothing is automated: there is no CI,
+   so the tag→version check and `virt-runner --version` on the tagged tree are on you. A published
+   version is immutable: yank and move to the next version, never re-use one, never delete a pushed
+   tag. Full detail: `CONTRIBUTING.md`.
 
 The first tag is `v0.4.0`; `v0.1.0`-`v0.3.0` were bump-only commits without a tag, so for
 those the changelog headings are the only record.

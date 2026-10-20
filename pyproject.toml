@@ -1,6 +1,6 @@
 [project]
 name = "virt-runner"
-version = "0.4.0"
+version = "0.5.0"
 description = "One-command KVM VM creation via libvirt + cloud-init"
 readme = "README.md"
 requires-python = ">=3.10"

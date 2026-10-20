@@ -8,8 +8,8 @@ Closes #
 
 ## Checklist
 
-- [ ] `uv run ruff check .` and `uv run ruff format --check .` pass
-- [ ] `uv run tests/unit_test.py` passes (add a case for every parser/branch you touched)
+- [ ] `./scripts/check.sh` passes (lint, format, unit tests, CLI, builds, `shellcheck`); run it
+      with `--all` before a release
 - [ ] `uv run tests/integration_test.py` passes — **run required for any user-visible behaviour**;
       write "not run, because …" if it genuinely does not apply
 - [ ] New parser or branch? → a unit test case exists
