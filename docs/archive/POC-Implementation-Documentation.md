@@ -6,7 +6,7 @@ per-ticket traceability, verification summary, and open follow-ups.
 **Companion documents:**
 [`specification/specification.md`](../specification/specification.md) ·
 [`docs/plans/poc-implementation-plan.md`](plans/poc-implementation-plan.md) ·
-[`.tickets/`](../.tickets/README.md) · [`docs/e2e-acceptance.md`](e2e-acceptance.md) ·
+[`.tickets/`](tickets/initial-poc/README.md) · [`docs/e2e-acceptance.md`](e2e-acceptance.md) ·
 [`docs/reviews/poc-review.md`](reviews/poc-review.md)
 
 ---
@@ -101,7 +101,7 @@ tickets (plan safety rule 2).
 
 ### Phase 3 — Ticketing (Agent 3)
 
-- **Output:** [`.tickets/`](../.tickets/README.md) — `ticket-01`…`ticket-07`
+- **Output:** [`.tickets/`](tickets/initial-poc/README.md) — `ticket-01`…`ticket-07`
   plus a ticket-format README — committed as `6a7aa60` (16:41).
 - **What it fixed:** one **self-contained** ticket per slice (a worker could
   implement it having read nothing else): title/goal, context (cited
@@ -342,7 +342,7 @@ performed, commit.
 - **This document**, plus the rewritten [`README.md`](../README.md) (project
   front door: description, requirements, quickstart, CLI reference,
   architecture diagram, layout, process, status) and
-  [`CHANGELOG.md`](../CHANGELOG.md) (Keep a Changelog, derived from the git
+  [`CHANGELOG.md`](../../CHANGELOG.md) (Keep a Changelog, derived from the git
   history), committed together and tagged **`v0.1.0`**.
 
 ---
