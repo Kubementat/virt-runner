@@ -2,13 +2,51 @@
 name = "virt-runner"
 version = "0.4.0"
 description = "One-command KVM VM creation via libvirt + cloud-init"
+readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "click>=8.0",
+]
+authors = [{ name = "Julian Weber" }]
+keywords = [
+    "kvm",
+    "libvirt",
+    "qemu",
+    "virt-install",
+    "cloud-init",
+    "virtual-machine",
+    "provisioning",
+    "devops",
+    "testing",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Installation/Setup",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Utilities",
+    "Topic :: Software Development :: Testing",
 ]
 
 [project.scripts]
 virt-runner = "virt_runner.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Kubementat/virt-runner"
+Repository = "https://github.com/Kubementat/virt-runner"
+"Bug Tracker" = "https://github.com/Kubementat/virt-runner/issues"
+Changelog = "https://github.com/Kubementat/virt-runner/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["hatchling"]
@@ -16,6 +54,20 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/virt_runner"]
+
+# sdist: the whole testable tree, so `pip install /sdist.tar.gz && pytest tests`
+# works from a source archive. The wheel stays lean (package only).
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/virt_runner",
+    "tests",
+    "skills",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "install-prerequisites.sh",
+]
 
 [dependency-groups]
 dev = [

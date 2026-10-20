@@ -7,7 +7,40 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ## [Unreleased]
 
-_No unreleased changes at present._
+### Added
+
+- **MIT license** — `LICENSE`, Copyright (c) 2026 Julian Weber, declared in the package metadata
+  (`license` + `license-files`), so `pip show virt-runner` and the PyPI page report it.
+- **Complete package metadata** — `readme`, `authors`, `keywords`, `classifiers`, and
+  `[project.urls]` (homepage/repository/issues/changelog). Before this, a published wheel carried an
+  empty project description.
+- **PyPI publishing** — `.github/workflows/release.yml` builds the sdist + wheel on a `vX.Y.Z` tag,
+  checks that the tag matches `pyproject.toml`, publishes with trusted publishing (no token in the
+  repository), and attaches the artifacts to the GitHub release. `uv tool install virt-runner` and
+  `uvx virt-runner` work once the first release is published.
+- **CI** — `.github/workflows/ci.yml`: `ruff check`, `ruff format --check`, the pure-logic unit
+  suite, a CLI smoke test, a wheel/sdist build, and `shellcheck` for `install-prerequisites.sh`.
+  Runs on Python 3.10 and 3.13. The integration suite stays local: it needs real KVM.
+- **`SECURITY.md`** — disclosure policy and the documented, deliberate security trade-offs
+  (SSH host-key checking disabled, best-effort image verification, one shared keypair per host,
+  `--mount` grants the guest write access to your host directories, libvirt/kvm group membership).
+- **`CONTRIBUTING.md`** and **`docs/README.md`** — dev setup, code map, the two test suites, the
+  contract rules for flags/error codes/JSON keys, and the release procedure.
+
+### Changed
+
+- **README installation story** — a new [Install](README.md#install) section separates the one-time
+  host prerequisites from the tool itself and documents the `uv tool install` / `uvx` workflow. All
+  examples now use the installed `virt-runner` command; `uv run` is documented as the checkout form.
+  The host installer is explicitly documented as Debian/Ubuntu (`apt-get`) only.
+- **Internal documents moved to `docs/archive/`** — `specification/`, `.tickets/`, `docs/plans/`,
+  `docs/reviews/`, the POC narrative, the Opus code review, and the POC e2e evidence. Nothing was
+  deleted; see [`docs/archive/README.md`](docs/archive/README.md). `docs/lessons-learned/` and
+  `docs/architecture-diagrams/` remain the living reference material.
+- **`install-prerequisites.sh` on a non-Debian host** — the error no longer points at `--help` for a
+  package list it does not print; it names the packages and the README section that describes them.
+- `tests/unit_test.py` reformatted — pre-existing drift that the new `ruff format --check` gate
+  catches. No test logic changed.
 
 ## [0.4.0] - 2026-10-18
 
