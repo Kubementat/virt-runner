@@ -104,6 +104,11 @@ virt-runner create NAME          # build + boot; --distro (ubuntu|arch|fedora),
                                  # --no-boot, --keep-going
 virt-runner destroy NAME         # undefine + delete disk (idempotent)
 virt-runner list                 # only VMs whose disk lives in vm-pool
+virt-runner modify NAME          # change an existing VM: --vcpu/--ram GiB/ count,
+                                 # --disk GiB (grow only), --net NETWORK|bridge=NAME,
+                                 # --net-add 'network=NAME[,mac=..]', --net-remove MAC,
+                                 # --mac MAC, --no-auto-grow-fs, --live, --reboot,
+                                 # --wait, --plan (dry run)
 virt-runner ssh NAME             # interactive shell (resolves IP, uses the injected key;
                                  # picks up the user recorded at create, --user to override)
 virt-runner setup [--check]      # host prerequisites — the bundled installer
@@ -113,14 +118,14 @@ virt-runner setup [--check]      # host prerequisites — the bundled installer
 Cached `latest`/`current` images are never refreshed — delete
 `~/vm-images/<distro>/<release>/` to pick up a newer build.
 
-All four VM commands accept `--json`: stdout carries **exactly one** JSON document (success *or*
+All five VM commands accept `--json`: stdout carries **exactly one** JSON document (success *or*
 error envelope), everything else goes to stderr. `VM_JSON_TRACE=1` re-sends progress lines to
 stderr for debugging. Envelope and error codes: [JSON output](#json-output).
 
 `setup` has no alias and no `--json`: it is not a VM command, it is a privileged host operation.
 
-Short aliases for the VM commands: `c` = `create`, `d` = `destroy`, `ls` = `list`, `s` = `ssh`
-(identical flags, exit codes and JSON `tool` ids).
+Short aliases for the VM commands: `c` = `create`, `d` = `destroy`, `ls` = `list`,
+`s` = `ssh`, `m` = `modify` (identical flags, exit codes and JSON `tool` ids).
 
 ```bash
 virt-runner create myvm --json | jq -r .vm.ssh_command
@@ -135,7 +140,7 @@ virt-runner create myvm --json | jq -r .vm.ssh_command
 {"tool": "vm-create", "version": "…", "status": "error", "error": {"code": "…", "message": "…"}}
 ```
 
-- `tool` — the command: `vm-create`, `vm-destroy`, `vm-list`, `vm-ssh`.
+- `tool` — the command: `vm-create`, `vm-destroy`, `vm-list`, `vm-modify`, `vm-ssh`.
 - `version` — installed package version.
 - `status` — `success` or `error`.
 - `error` — `null` on success, else `{code, message}` plus `stage` when the
@@ -161,6 +166,12 @@ failure, `2` usage error.
 | `unsupported-arch` | Host arch is not x86_64 or aarch64 |
 | `vm-already-defined` | A domain with the given name already exists |
 | `vm-not-defined` | No such domain (destroy/ssh of a missing VM) |
+| `vm-not-found` | No such domain (`modify` of a missing VM) |
+| `not-a-virt-runner-vm` | The domain exists but virt-runner did not create it (`modify`) |
+| `modify-noop` | `modify` where every given option already matches the VM (exit 2) |
+| `disk-shrink-unsupported` | `modify --disk` smaller than the current disk |
+| `net-change-failed` | `virsh attach-interface`/`detach-interface` failed |
+| `vm-reboot-failed` | `modify --reboot` could not power-cycle the domain |
 | `vm-not-running` | The domain exists but is not running |
 | `no-ip` | No DHCP lease/address found for the VM |
 | `ssh-key-missing` | No usable key at `--ssh-key` and none could be generated |
@@ -179,6 +190,32 @@ failure, `2` usage error.
 | `ssh-timeout` | The SSH round-trip never succeeded within the wait window |
 | `virtiofsd-missing` | `--mount` given but `/usr/libexec/virtiofsd` is not installed |
 | `script-failed` | A `--script` exited non-zero (the VM is kept running) |
+
+## Resizing a running VM
+
+`modify` reports what it changed and — this is the part that matters — **when the guest sees
+it**: every change carries `effective: "now"` or `"on-boot"`.
+
+```bash
+virt-runner modify myvm --vcpu 4 --ram 8 --disk 40 --reboot --wait   # apply, reboot, wait for SSH
+virt-runner modify myvm --net-add mgmt --json | jq .changes          # plan-free, live NIC add
+```
+
+- **vCPU / RAM** are persisted with `virsh setvcpus`/`setmem --config`. libvirt refuses a *live*
+  change above the domain's ceiling, so `--live` is best effort: if the hot-plug is refused the
+  change still lands in the config, is reported as `on-boot` and comes with a warning. A change
+  the running guest did not take is never silently diverging — `--reboot` (optionally `--wait`)
+  closes the gap.
+- **Disk** grows with `virsh blockresize` (a powered-off guest grows its pool volume instead) and
+  then grows the guest's own filesystem over SSH (`growpart` + `resize2fs`/`xfs_growfs`/`btrfs`).
+  That last step is best effort: if the guest lacks `growpart` or the layout is LVM, the block
+  device is still grown and the warning lists the commands to run inside the guest.
+  `--no-auto-grow-fs` skips the SSH step entirely.
+- **Networking**: `--net` re-attaches the primary NIC, `--net-add` adds one, `--net-remove MAC`
+  removes one (the last NIC can not be removed), `--mac` changes the primary NIC's MAC — detach
+  plus attach, so the guest asks for a new lease. A bare `--net`/`--net-add` name that is not a
+  defined virtual network is attached as a bridge of that name.
+- `--plan` prints the same document with `"planned": true` and touches nothing.
 
 ## Shared directories
 
@@ -306,3 +343,5 @@ project's `.claude/skills/`).
 | `no DHCP lease after 120s` / `SSH … not reachable yet` | `virsh console NAME` (Ctrl-`]` to detach) to watch the guest; for SSH make sure you use the key the VM was given: `ssh -i ~/.ssh/virt_runner_key ubuntu@IP` (`virt-runner ssh NAME` picks up the right user automatically; for Arch that is `arch`, for Fedora that is `fedora`) |
 | `SHA256 mismatch` | Corrupt cache: delete `~/vm-images/<release>/` and retry |
 | disk survives `destroy` | `virsh vol-delete NAME_vda.qcow2 vm-pool` |
+| `modify` reports `effective: on-boot` and the guest still shows the old size | libvirt could not hot-plug it (above the domain's ceiling, or no balloon/vcpu hot-add): `virt-runner modify NAME --reboot --wait` |
+| `modify` grew the disk but `df` did not move | the guest-side grow was best effort (LVM, or no `growpart`): run the commands from the warning inside the guest (`sudo growpart /dev/vda N`, `sudo resize2fs`/`xfs_growfs`), then `virt-runner modify NAME --disk <same-size>` to retry |

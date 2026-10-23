@@ -1,7 +1,7 @@
 ---
 name: virt-runner-cli
 description: |
-  Expert use of the `virt-runner` CLI: one command to a running, SSH-reachable Ubuntu, Arch or Fedora KVM guest via libvirt (qemu:///system) + cloud-init, with `create`, `destroy`, `list` and `ssh` subcommands (short aliases `c`, `d`, `ls`, `s`), a `setup` subcommand for host prerequisites, and a stable `--json` contract for the VM commands. Use when the user mentions virt-runner, wants to create, provision, list, SSH into or destroy throwaway/test KVM or libvirt VMs, spin up a clean Ubuntu/Arch/Fedora VM to test something, share host directories into a VM (virtiofs `--mount`), provision a VM with setup scripts (`--script`), run a multi-distro test matrix, script VM lifecycles with JSON/jq, or debug a failed VM create (lease/SSH timeouts, image download/verification, script failures).
+  Expert use of the `virt-runner` CLI: one command to a running, SSH-reachable Ubuntu, Arch or Fedora KVM guest via libvirt (qemu:///system) + cloud-init, with `create`, `destroy`, `list`, `modify` and `ssh` subcommands (short aliases `c`, `d`, `ls`, `m`, `s`), a `setup` subcommand for host prerequisites, and a stable `--json` contract for the VM commands. Use when the user mentions virt-runner, wants to create, provision, list, resize, change the networking of, SSH into or destroy throwaway/test KVM or libvirt VMs, spin up a clean Ubuntu/Arch/Fedora VM to test something, share host directories into a VM (virtiofs `--mount`), provision a VM with setup scripts (`--script`), grow a VM's disk or change its vCPU/RAM/NICs/MAC, run a multi-distro test matrix, script VM lifecycles with JSON/jq, or debug a failed VM create (lease/SSH timeouts, image download/verification, script failures).
 compatibility: Requires a KVM host (x86_64 or aarch64) with libvirt, virt-install >= 4.1 and Python >= 3.10. Run as `virt-runner ...` when installed (`uv tool install virt-runner`), or `uv run virt-runner ...` from a checkout.
 ---
 
@@ -63,8 +63,8 @@ Quick manual fixes: `virsh pool-start vm-pool && virsh net-start default`.
 
 ## Commands
 
-Short aliases work everywhere: `c` = `create`, `d` = `destroy`, `ls` = `list`, `s` = `ssh`.
-Identical behaviour, flags and exit codes; the JSON `tool` id stays canonical (`vm-create`,
+Short aliases work everywhere: `c` = `create`, `d` = `destroy`, `ls` = `list`, `m` = `modify`,
+`s` = `ssh`. Identical behaviour, flags and exit codes; the JSON `tool` id stays canonical (`vm-create`,
 not `vm-c`). Use the full names in anything you write to disk so the command stays greppable.
 
 ### create NAME
@@ -111,6 +111,32 @@ output goes to stderr and a summary document is printed at the end.
 `NAME_vda.qcow2` from `vm-pool`. Already-absent volume is only a warning. A **missing domain is
 an error** (`vm-not-defined`, exit 1) — treat that code as "already gone" for idempotent cleanup.
 Never touches `--mount` host directories or the image cache.
+
+### modify NAME
+
+`virt-runner modify NAME [--vcpu N] [--ram GiB] [--disk GiB] [--net SPEC] [--net-add SPEC]
+[--net-remove MAC] [--mac MAC] [--live] [--reboot] [--wait] [--no-auto-grow-fs] [--plan] [--json]`
+— change an existing virt-runner VM in place. Needs at least one change option; all composable.
+
+| Flag | Effect |
+|---|---|
+| `--vcpu N` / `--ram GiB` | persisted with `setvcpus`/`setmem --config`; a grow past the domain's ceiling needs the boot, `--live` hot-plugs where libvirt allows |
+| `--disk GiB` | **grow only** (`disk-shrink-unsupported`); `blockresize`, or `vol-resize --grow` when powered off, then grows the guest filesystem over SSH unless `--no-auto-grow-fs` |
+| `--net SPEC` | re-attach the primary NIC (`network=NAME` or `bridge=NAME`); a bare name that is no defined network becomes a bridge of that name |
+| `--net-add SPEC` | add a NIC: `network=NAME` / `bridge=NAME`, optional `,mac=52:54:…`, optional `,model=…` |
+| `--net-remove MAC` | remove one NIC by MAC — the **last** NIC is refused (usage) |
+| `--mac MAC` | new MAC on the primary NIC (detach + attach — the guest re-acquires a lease) |
+| `--reboot` / `--wait` | power-cycle so on-boot changes land; `--wait` also waits for the lease + SSH and reports `ip` |
+| `--plan` | same document with `"planned": true`, libvirt untouched |
+
+Every change carries `effective: "now"|"on-boot"`: a running guest and its persisted config are
+distinct, and a refused live change **degrades** to `on-boot` with a warning instead of failing.
+After `--reboot` the changes report `now`. The guest filesystem grow is best effort (needs a
+booted guest, `growpart`, and a layout we support — LVM is reported, not touched); `fs_grown`:
+`true`/`false`/`null` says what happened and the warning lists the commands to run by hand.
+Re-running the same `--disk GiB` is the way to retry that grow. Errors: `vm-not-found`,
+`not-a-virt-runner-vm`, `modify-noop` (exit 2), `disk-shrink-unsupported`, `net-change-failed`,
+`vm-reboot-failed`.
 
 ### setup
 
@@ -169,7 +195,7 @@ virt-runner create dev --script setup.sh --script configure.py
 {"tool":"vm-create","version":"…","status":"error","error":{"code":"ssh-timeout","message":"…","stage":"ssh-verify"},"booted":true,"vm":{…},"image":{…},"scripts":[]}
 ```
 
-- `tool`: `vm-create` / `vm-destroy` / `vm-list` / `vm-ssh`. Usage errors also produce an
+- `tool`: `vm-create` / `vm-destroy` / `vm-list` / `vm-modify` / `vm-ssh`. Usage errors also produce an
   envelope (`code: "usage"`) when `--json` is on the command line.
 - Exit codes: `0` success, `1` runtime/preflight failure, `2` usage error (same with/without `--json`).
 - Human progress is suppressed under `--json`; set `VM_JSON_TRACE=1` to see it on stderr.

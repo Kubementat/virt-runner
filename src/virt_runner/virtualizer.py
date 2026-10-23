@@ -29,7 +29,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -134,6 +134,73 @@ def _non_empty_file(path: Path) -> bool:
     return path.is_file() and path.stat().st_size > 0
 
 
+# ---------------------------------------------------------------------------
+# Sizes and the `modify` effective-state vocabulary
+# ---------------------------------------------------------------------------
+
+#: ``modify`` ``effective`` values: a change is either live in the hypervisor
+#: right now, or written to the persisted config and applied on next boot.
+EFFECTIVE_NOW = "now"
+EFFECTIVE_ON_BOOT = "on-boot"
+
+#: ``virsh domstate`` value of a powered-on domain.
+STATE_RUNNING = "running"
+
+#: Multipliers that turn a sized libvirt value into KiB. Domain XML uses
+#: ``KiB``; ``virsh vol-info`` prints IEC units and ``domblkinfo`` SI ones.
+_SIZE_UNITS_KIB = {
+    "B": 1 / 1024,
+    "KB": 1000 / 1024,
+    "K": 1,
+    "KIB": 1,
+    "MB": 1000**2 / 1024,
+    "M": 1024,
+    "MIB": 1024,
+    "GB": 1000**3 / 1024,
+    "G": 1024**2,
+    "GIB": 1024**2,
+    "TB": 1000**4 / 1024,
+    "T": 1024**3,
+    "TIB": 1024**3,
+}
+
+_SIZE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]*)")
+
+
+def parse_size_kib(value: str | None, unit: str | None = None) -> int | None:
+    """Parse a libvirt size into KiB: ``("4194304", "KiB")`` or ``"8.0 GiB"``.
+
+    A bare number is KiB (what domain XML stores); suffixed values accept both
+    IEC (``GiB``) and SI (``GB``) spellings. ``None`` when unparseable, so a
+    caller reports "unknown" rather than a wrong size.
+    """
+    if not value:
+        return None
+    match = _SIZE_RE.fullmatch(value.strip())
+    if match is None:
+        return None
+    factor = _SIZE_UNITS_KIB.get((match.group(2) or unit or "KiB").upper())
+    if factor is None:
+        return None
+    return int(round(float(match.group(1)) * factor))
+
+
+def parse_capacity_gib(info: str) -> int | None:
+    """The GiB capacity of a ``virsh vol-info`` / ``domblkinfo`` table.
+
+    Only the ``Capacity:`` row matters, and the ``--disk`` contract speaks whole
+    GiB, so the value is rounded. A bare number in such a table is *bytes*
+    (``domblkinfo`` without ``--human``), unlike the bare KiB of domain XML.
+    """
+    for line in info.splitlines():
+        key, sep, rest = line.partition(":")
+        if not sep or key.strip().lower() != "capacity":
+            continue
+        kib = parse_size_kib(rest, "B")
+        return None if kib is None else int(round(kib / 1024 / 1024))
+    return None
+
+
 def volume_name(name: str) -> str:
     """The disk volume of a VM: ``<NAME>_vda.qcow2``.
 
@@ -186,6 +253,136 @@ class VmInfo:
     def running(self) -> bool:
         """True when the domain is in the ``running`` state."""
         return self.state == "running"
+
+
+@dataclass(frozen=True)
+class Interface:
+    """One vNIC of a domain (``modify`` reads and re-writes these)."""
+
+    type: str
+    source: str
+    mac: str
+    model: str = "virtio"
+
+    def document(self) -> dict[str, str]:
+        """JSON form of the NIC (``interface`` change entries report it)."""
+        return {"type": self.type, "source": self.source, "mac": self.mac}
+
+
+@dataclass(frozen=True)
+class VmSpec:
+    """Sizing, disk and NIC facts of a domain, as ``modify`` needs them.
+
+    ``ram_max_kib``/``vcpu_max`` are the ceilings libvirt refuses to cross
+    without a second call (``<memory>`` and ``<vcpu max>"); they are what
+    decides whether a live change is possible at all. ``disk_gib`` is read from
+    the backing volume, which is the only place libvirt stores a size.
+    """
+
+    name: str
+    uuid: str
+    state: str
+    vcpu: int
+    vcpu_max: int
+    ram_kib: int
+    ram_max_kib: int
+    disk_target: str
+    disk_gib: int | None
+    interfaces: tuple[Interface, ...] = ()
+
+    @property
+    def running(self) -> bool:
+        """True when the domain is powered on."""
+        return self.state == STATE_RUNNING
+
+    @property
+    def primary(self) -> Interface | None:
+        """The NIC that ``--net``/``--mac`` act on (the first one)."""
+        return self.interfaces[0] if self.interfaces else None
+
+    def document(self) -> dict[str, Any]:
+        """The ``vm`` section of the ``vm-modify`` document."""
+        return {
+            "name": self.name,
+            "uuid": self.uuid,
+            "state": self.state,
+            "vcpu": self.vcpu,
+            "ram_gib": self.ram_gib,
+            "disk_gib": self.disk_gib,
+            "interfaces": [i.document() for i in self.interfaces],
+        }
+
+    @property
+    def ram_gib(self) -> int:
+        """RAM in GiB (the unit the CLI speaks); 0 when the XML had none."""
+        return int(round(self.ram_kib / 1024 / 1024))
+
+
+def parse_vm_spec(xml_text: str) -> VmSpec | None:
+    """Parse ``virsh dumpxml`` output into a :class:`VmSpec` (``None`` if foreign).
+
+    Pure: ``disk_gib`` is left ``None`` because the size lives in the volume,
+    not in the XML — :meth:`Virtualizer.domain_spec` fills it in.
+    """
+    if not xml_text.strip():
+        return None
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return None
+
+    vcpu_el = root.find("vcpu")
+    if vcpu_el is None:
+        return None
+    vcpu_max = _int(vcpu_el.text)
+    vcpu = _int(vcpu_el.get("current")) or vcpu_max
+
+    ram_kib = parse_size_kib(root.findtext("memory"), "KiB") or 0
+    ram_max_kib = parse_size_kib(root.findtext("maxMemory"), "KiB") or ram_kib
+
+    interfaces: list[Interface] = []
+    for el in root.iterfind("devices/interface"):
+        mac = el.find("mac")
+        source = el.find("source")
+        model = el.find("model")
+        src_type = el.get("type", "network")
+        interfaces.append(
+            Interface(
+                type=src_type,
+                source=(source.get("network") or source.get("bridge") or "")
+                if source is not None
+                else "",
+                mac=mac.get("address", "").lower() if mac is not None else "",
+                model=model.get("type", "virtio") if model is not None else "virtio",
+            )
+        )
+
+    disk_target = ""
+    disk = root.find("devices/disk[@device='disk']")
+    if disk is not None:
+        target = disk.find("target")
+        disk_target = target.get("dev", "") if target is not None else ""
+
+    return VmSpec(
+        name=root.findtext("name", ""),
+        uuid=root.findtext("uuid", ""),
+        state="",
+        vcpu=vcpu,
+        vcpu_max=vcpu_max,
+        ram_kib=ram_kib,
+        ram_max_kib=ram_max_kib,
+        disk_target=disk_target,
+        disk_gib=None,
+        interfaces=tuple(interfaces),
+    )
+
+
+def _int(value: str | None) -> int:
+    """Integer attribute/text value, ``0`` when absent or malformed."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return 0
 
 
 #: ``vm-list`` ``ip_status`` values (spec §5.3.3).
@@ -1324,3 +1521,327 @@ class Virtualizer:
             confirmation=confirm,
             warning=warning,
         )
+
+    # ------------------------------------------------------------------
+    # Modify (vCPU / RAM / disk / networking)
+    # ------------------------------------------------------------------
+
+    def owns_domain(self, name: str) -> bool:
+        """True when *name* is a domain virt-runner created (or owns the disk of).
+
+        Same membership test as ``vm-list`` (a disk under the pool path), plus
+        the per-VM metadata written at create — a domain defined by hand that
+        happens to borrow a pool volume is still not ours to resize.
+        """
+        if self.domain_meta(name):
+            return True
+        root = self.domain_xml(name)
+        if root is None:
+            return False
+        return self._has_disk_in_pool(root, self.get_pool_path().rstrip("/"))
+
+    def disk_volume(self, name: str) -> str | None:
+        """Pool volume backing *name*'s first disk, or ``None`` when outside."""
+        root = self.domain_xml(name)
+        if root is None:
+            return None
+        pool = self.get_pool_path().rstrip("/")
+        for source in root.iterfind("devices/disk/source"):
+            path = source.get("file") or ""
+            if path.startswith(f"{pool}/") and path != pool:
+                return path[len(pool) + 1 :]
+        return None
+
+    def disk_capacity_gib(
+        self, name: str, target: str, volume: str | None
+    ) -> int | None:
+        """Current disk size in GiB: the pool volume first, ``domblkinfo`` next.
+
+        ``None`` when neither reports a size — callers must then refuse to
+        resize rather than guess at a ceiling.
+        """
+        if volume:
+            gib = parse_capacity_gib(
+                _stdout(["virsh", "vol-info", "--pool", self.POOL, volume])
+            )
+            if gib is not None:
+                return gib
+        if not target:
+            return None
+        return parse_capacity_gib(_stdout(["virsh", "domblkinfo", name, target]))
+
+    def domain_spec(self, name: str) -> VmSpec | None:
+        """Full :class:`VmSpec` of *name* (XML + backing volume), ``None`` if absent."""
+        spec = parse_vm_spec(_stdout(["virsh", "dumpxml", name]))
+        if spec is None:
+            return None
+        volume = self.disk_volume(name)
+        return replace(
+            spec,
+            name=name,
+            state=self.get_domain_state(name),
+            disk_gib=self.disk_capacity_gib(name, spec.disk_target, volume),
+        )
+
+    def network_defined(self, network: str) -> bool:
+        """True when libvirt knows a virtual network of that name."""
+        return _spawn(["virsh", "net-dumpxml", network]).returncode == 0
+
+    @staticmethod
+    def _flags(live: bool) -> list[str]:
+        """``--live --config`` when a change must land on the running domain too."""
+        return ["--live", "--config"] if live else ["--config"]
+
+    def set_vcpu(self, name: str, vcpu: int, *, live: bool, ceiling: int) -> bool:
+        """Persist the vCPU count; hot-plug first when *live*.
+
+        Returns:
+            ``True`` when the running domain was changed as well.
+
+        Raises:
+            RuntimeError: the persisted change failed (a plain ``RuntimeError``
+                keeps the generic ``runtime-error`` code — libvirt's own message
+                is the useful part here).
+        """
+        live_ok = (
+            live
+            and _spawn(["virsh", "setvcpus", name, str(vcpu), "--live"]).returncode == 0
+        )
+        self._write_vcpu_config(name, vcpu, ceiling)
+        return live_ok
+
+    def _write_vcpu_config(self, name: str, vcpu: int, ceiling: int) -> None:
+        """``virsh setvcpus --config``, raising ``<vcpu max>`` first when growing.
+
+        libvirt rejects a config vCPU count above the configured maximum, so a
+        grow past the ceiling is a two-step change: ``--maximum`` lifts the
+        persisted ceiling (config-only — a live domain's maximum is fixed until
+        it reboots), then the count is set.
+        """
+        try:
+            _run(["virsh", "setvcpus", name, str(vcpu), "--config"])
+        except RuntimeError:
+            if vcpu <= ceiling:
+                raise
+            _run(["virsh", "setvcpus", name, str(vcpu), "--maximum", "--config"])
+            _run(["virsh", "setvcpus", name, str(vcpu), "--config"])
+
+    def set_ram_gib(self, name: str, ram_gib: int, *, live: bool, ceiling: int) -> bool:
+        """Persist the RAM size in GiB; balloon first when *live*.
+
+        Returns:
+            ``True`` when the running domain was changed as well.
+
+        Raises:
+            RuntimeError: the persisted change failed.
+        """
+        kib = str(ram_gib * 1024 * 1024)
+        live_ok = (
+            live and _spawn(["virsh", "setmem", name, kib, "--live"]).returncode == 0
+        )
+        self._write_ram_config(name, kib, ceiling)
+        return live_ok
+
+    def _write_ram_config(self, name: str, kib: str, ceiling: int) -> None:
+        """``virsh setmem --config``, raising the total memory first when growing.
+
+        Growing past ``<memory>`` fails with "cannot set memory higher than max
+        memory", so the ceiling goes up through ``--maximum`` (which writes
+        ``<memory>`` when the domain has no ``<maxMemory>`` element, as every
+        virt-runner guest has) before the same value is set as the boot size.
+        """
+        try:
+            _run(["virsh", "setmem", name, kib, "--config"])
+        except RuntimeError:
+            if int(kib) <= ceiling:
+                raise
+            _run(["virsh", "setmem", name, kib, "--maximum", "--config"])
+            _run(["virsh", "setmem", name, kib, "--config"])
+
+    def grow_disk(self, name: str, target: str, volume: str | None, gib: int) -> None:
+        """Grow the domain's first disk to *gib* (never shrinks — checked upstream).
+
+        ``virsh blockresize`` is the live primitive, but libvirt only resizes an
+        *active* domain, so a shut-off one grows by its pool volume — which
+        virt-runner owns for every VM it creates.
+
+        Raises:
+            RuntimeError: live resize failed.
+            VirtError: ``volume-resize-failed`` when the volume grow failed.
+        """
+        result = _spawn(["virsh", "blockresize", name, target, f"{gib}G"])
+        if result.returncode == 0:
+            return
+        if self.get_domain_state(name) == STATE_RUNNING or volume is None:
+            raise RuntimeError(
+                f"failed to grow disk '{target}' of '{name}' to {gib}G: "
+                f"{result.stderr.strip() or 'virsh blockresize failed'}"
+            )
+        self.grow_volume(volume, gib)
+
+    def grow_volume(self, volume: str, disk_gib: int) -> None:
+        """Grow a pool volume, refusing to shrink it (``vol-resize --grow``).
+
+        Raises:
+            VirtError: ``volume-resize-failed``.
+        """
+        try:
+            _run(
+                [
+                    "virsh",
+                    "vol-resize",
+                    volume,
+                    "--pool",
+                    self.POOL,
+                    "--capacity",
+                    f"{disk_gib}G",
+                    "--grow",
+                ]
+            )
+        except RuntimeError as exc:
+            raise VirtError(
+                f"failed to grow pool volume '{volume}' to {disk_gib}G",
+                "volume-resize-failed",
+            ) from exc
+
+    def attach_interface(self, name: str, iface: Interface, *, live: bool) -> None:
+        """Attach a NIC; the MAC is kept when the caller carries one.
+
+        Raises:
+            VirtError: ``net-change-failed`` with libvirt's reason.
+        """
+        cmd = [
+            "virsh",
+            "attach-interface",
+            name,
+            iface.type,
+            iface.source,
+            "--model",
+            iface.model or "virtio",
+        ]
+        if iface.mac:
+            cmd += ["--mac", iface.mac]
+        self._change_interface(cmd + self._flags(live), name, f"attach {iface}")
+
+    def detach_interface(self, name: str, iface: Interface, *, live: bool) -> None:
+        """Detach the NIC with *iface*'s MAC.
+
+        Raises:
+            VirtError: ``net-change-failed`` with libvirt's reason.
+        """
+        cmd = [
+            "virsh",
+            "detach-interface",
+            name,
+            iface.type,
+            "--mac",
+            iface.mac,
+            *self._flags(live),
+        ]
+        self._change_interface(cmd, name, f"detach {iface}")
+
+    @staticmethod
+    def _change_interface(cmd: list[str], name: str, what: str) -> None:
+        """Run one interface change and turn any failure into ``net-change-failed``."""
+        result = _spawn(cmd)
+        if result.returncode != 0:
+            raise VirtError(
+                f"failed to {what} NIC of '{name}': "
+                f"{result.stderr.strip() or 'virsh failed'}",
+                "net-change-failed",
+            )
+
+    def reboot(self, name: str) -> None:
+        """Power-cycle the domain (start it when it was off).
+
+        Raises:
+            RuntimeError: from destroy/start — a half-rebooted VM must not
+                report success.
+        """
+        if self.get_domain_state(name) == STATE_RUNNING:
+            _run(["virsh", "destroy", name])
+        _run(["virsh", "start", name])
+
+    def grow_guest_filesystem(
+        self, user: str, ip: str, target: str, identity: str | None = None
+    ) -> tuple[int, str]:
+        """Grow the guest's root partition/filesystem into the resized disk.
+
+        Best-effort by contract: the return value is ``(exit_code, output)`` and
+        the caller turns anything but 0 into a warning. The script stays distro
+        neutral — util-linux (`findmnt`/`growpart`) plus the filesystem's own
+        grow tool — and prints a ``virt-runner:`` line explaining any skip.
+
+        Raises:
+            RuntimeError: ssh itself could not run (the guest is unreachable).
+        """
+        cmd = [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "LogLevel=ERROR",
+            "-o",
+            "ConnectTimeout=5",
+            *_ssh_args(identity),
+            f"{user}@{ip}",
+            "sudo",
+            "-n",
+            "bash",
+            "-s",
+            "--",
+            target,
+        ]
+        result = _spawn(cmd, input=_FS_GROW_SCRIPT)
+        return result.returncode, (result.stdout + result.stderr).strip()
+
+
+#: Grows the root partition of the resized disk and then the filesystem on it.
+#: Any non-zero exit is a warning for `modify`, and every skip prints the exact
+#: manual commands, because the layout (`growpart` missing, LVM, exotic fs) is
+#: the guest's business and virt-runner does not guess its way through it.
+_FS_GROW_SCRIPT = r"""set -u
+disk=$1
+dev=/dev/$disk
+root=$(findmnt -no SOURCE /) || { echo "virt-runner: findmnt failed"; exit 1; }
+
+if [ ! -b "$dev" ]; then
+  echo "virt-runner: $dev not found in the guest — filesystem left alone"
+  exit 0
+fi
+
+case $root in
+  "$dev")   part="" ;;
+  "$dev"p[0-9]*) part=${root#"$dev"p} ;;
+  "$dev"[0-9]*)  part=${root#"$dev"} ;;
+  /dev/mapper/*|/dev/dm-*)
+    echo "virt-runner: root is on LVM ($root) — grow manually: sudo pvresize <disk of $root> && sudo lvextend -l +100%FREE --resizefs $root"
+    exit 0 ;;
+  *)
+    echo "virt-runner: root device $root is not on $dev — filesystem left alone"
+    exit 0 ;;
+esac
+
+if [ -n "$part" ]; then
+  if ! command -v growpart >/dev/null 2>&1; then
+    echo "virt-runner: growpart is not installed in the guest — grow manually: sudo growpart $dev $part, then the resize below"
+    exit 0
+  fi
+  growpart "$dev" "$part"
+  rc=$?
+  # growpart exit 5 means "already as large as it can be" — nothing to do.
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
+    echo "virt-runner: growpart $dev $part failed (exit $rc)"
+    exit 1
+  fi
+fi
+
+fstype=$(blkid -o value -s TYPE "$root" | head -n 1)
+case $fstype in
+  ext2|ext3|ext4) resize2fs "$root" ;;
+  xfs) xfs_growfs / ;;
+  btrfs) btrfs filesystem resize max / ;;
+  *) echo "virt-runner: unsupported guest filesystem '$fstype' — grow it manually"; exit 0 ;;
+esac
+echo "virt-runner: guest filesystem grown"
+"""

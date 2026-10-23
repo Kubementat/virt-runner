@@ -27,11 +27,18 @@ import click
 from virt_runner.cmd_create import cmd_create
 from virt_runner.cmd_destroy import cmd_destroy
 from virt_runner.cmd_list import cmd_list
+from virt_runner.cmd_modify import cmd_modify
 from virt_runner.cmd_setup import cmd_setup
 from virt_runner.cmd_ssh import cmd_ssh
 
 #: Short forms accepted instead of the full subcommand name.
-ALIASES = {"c": "create", "d": "destroy", "ls": "list", "s": "ssh"}
+ALIASES = {
+    "c": "create",
+    "d": "destroy",
+    "ls": "list",
+    "s": "ssh",
+    "m": "modify",
+}
 
 
 class AliasGroup(click.Group):
@@ -58,6 +65,7 @@ def main():
 main.add_command(cmd_create, "create")
 main.add_command(cmd_destroy, "destroy")
 main.add_command(cmd_list, "list")
+main.add_command(cmd_modify, "modify")
 main.add_command(cmd_ssh, "ssh")
 main.add_command(cmd_setup, "setup")
 

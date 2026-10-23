@@ -2,6 +2,7 @@
 
 import json
 
+import virt_runner.cmd_modify as cm
 import virt_runner.virtualizer as vz
 from virt_runner import images
 from virt_runner.cmd_create import _validate_mounts, _validate_user
@@ -15,6 +16,173 @@ from virt_runner.virtualizer import (
     render_user_data,
     script_command,
 )
+
+# `modify` reads a domain through these three calls; one XML sample is enough
+# to check the parser without a host.
+VM_XML = """<domain type='kvm' id='3'>
+  <name>t1</name>
+  <uuid>6f6da4d2-9d67-4d6a-9c1a-0f0f0f0f0f0f</uuid>
+  <memory unit='KiB'>2097152</memory>
+  <currentMemory unit='KiB'>2097152</currentMemory>
+  <vcpu placement='static' current='2'>4</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-9.0'>hvm</type>
+  </os>
+  <devices>
+    <disk type='file' device='disk'>
+      <source file='/var/lib/libvirt/images/t1_vda.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <interface type='network'>
+      <mac address='52:54:00:AA:BB:CC'/>
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>
+  </devices>
+</domain>
+"""
+
+
+def vm_spec(**overrides):
+    """A running 2 vCPU / 2 GiB / 8 GiB single-NIC guest, bent per test."""
+    fields = {
+        "name": "t1",
+        "uuid": "6f6da4d2-9d67-4d6a-9c1a-0f0f0f0f0f0f",
+        "state": "running",
+        "vcpu": 2,
+        "vcpu_max": 4,
+        "ram_kib": 2 * 1024 * 1024,
+        "ram_max_kib": 2 * 1024 * 1024,
+        "disk_target": "vda",
+        "disk_gib": 8,
+        "interfaces": (vz.Interface("network", "default", "52:54:00:aa:bb:cc"),),
+    }
+    fields.update(overrides)
+    return vz.VmSpec(**fields)
+
+
+class FakeVz:
+    """A `Virtualizer` that only remembers what libvirt was asked to do.
+
+    The live answers follow libvirt's own rules (a change above the ceiling is
+    not live, a guest that is off does not balloon), so the plan/apply split is
+    exercised for real; `net_error`/`fs_code` inject the failures.
+    """
+
+    POOL = "vm-pool"
+    DEFAULT_USER = "ubuntu"
+
+    def __init__(
+        self,
+        *,
+        running=True,
+        spec=None,
+        net_error=None,
+        fs_code=0,
+        fs_out="virt-runner: guest filesystem grown",
+    ):
+        self.running = running
+        self.spec = spec or vm_spec(state="running" if running else "shut off")
+        self.net_error = net_error
+        self.fs_code = fs_code
+        self.fs_out = fs_out
+        self.vcpu_calls = []
+        self.ram_calls = []
+        self.disks = []
+        self.grown = []
+        self.ifaces = []
+        self.reboots = 0
+
+    @staticmethod
+    def private_key_path(pub_path):
+        return "/tmp/vr-test/id_ed25519"
+
+    # --- identity (the command guards with these before changing anything) ---
+
+    def require_libvirt(self):
+        pass
+
+    def require_pool_defined(self):
+        pass
+
+    def domain_exists(self, name):
+        return name != "ghost"
+
+    def owns_domain(self, name):
+        return name != "foreign"
+
+    def domain_meta(self, name):
+        return {"user": "ci", "identity": "/tmp/vr-test/id_ed25519"}
+
+    def disk_volume(self, name):
+        return f"{name}_vda.qcow2"
+
+    def domain_spec(self, name):
+        return self.spec
+
+    def network_defined(self, network):
+        return network in ("default", "mgmt")
+
+    def vm_ip(self, name, lease_file):
+        return "192.168.122.11" if self.running else None
+
+    # --- changes ---
+
+    def set_vcpu(self, name, vcpu, *, live, ceiling):
+        self.vcpu_calls.append((vcpu, live, ceiling))
+        return live and self.running and vcpu <= ceiling
+
+    def set_ram_gib(self, name, ram_gib, *, live, ceiling):
+        self.ram_calls.append((ram_gib, live))
+        return live and self.running and ram_gib * 1024 * 1024 <= ceiling
+
+    def grow_disk(self, name, target, volume, gib):
+        self.disks.append((name, target, volume, gib))
+
+    def grow_guest_filesystem(self, user, ip, target, identity=None):
+        self.grown.append((user, ip, target))
+        return self.fs_code, self.fs_out
+
+    def attach_interface(self, name, iface, *, live):
+        self._iface("attach", name, iface, live)
+
+    def detach_interface(self, name, iface, *, live):
+        self._iface("detach", name, iface, live)
+
+    def _iface(self, action, name, iface, live):
+        if self.net_error:
+            raise VirtError(
+                f"failed to {action} {iface} NIC of '{name}': {self.net_error}",
+                "net-change-failed",
+            )
+        self.ifaces.append((action, iface.type, iface.source, iface.mac, live))
+
+    def reboot(self, name):
+        self.reboots += 1
+
+    def wait_for_ip(self, name, mac, lease_file, timeout_s=120):
+        return "192.168.122.99"
+
+    def verify_ssh_reachable(self, name, user, ip, identity=None):
+        pass
+
+
+def modify_cli(fake, argv):
+    """Run `virt-runner modify` against *fake* and return (exit, parsed JSON)."""
+    from click.testing import CliRunner
+
+    from virt_runner.cli import main as cli_main
+    from virt_runner.output import set_json_mode
+
+    real = cm.Virtualizer
+    cm.Virtualizer = lambda: fake
+    try:
+        res = CliRunner().invoke(cli_main, ["modify", *argv])
+    finally:
+        cm.Virtualizer = real
+        set_json_mode(False)
+    body = json.loads(res.stdout) if res.stdout.strip() else {}
+    return res.exit_code, body
 
 
 def main() -> None:
@@ -520,6 +688,454 @@ def main() -> None:
     assert 'bash "$f"' in script_command(sdir / "c.sh")
     assert "cloud-init status --wait" in script_command(sdir / "c.sh")
 
+    # ------------------------------------------------------------------
+    # modify — sizes, domain spec, planning, applying (all pure / faked)
+    # ------------------------------------------------------------------
+
+    # parse_size_kib — a bare number is KiB (domain XML); suffixed values take
+    # both IEC (vol-info) and SI (domblkinfo) spellings; junk stays None so a
+    # caller says "unknown" instead of resizing against a guessed ceiling.
+    assert vz.parse_size_kib("2097152") == 2097152
+    assert vz.parse_size_kib("2097152", "KiB") == 2097152
+    assert vz.parse_size_kib("2.0 GiB") == 2 * 1024 * 1024
+    assert vz.parse_size_kib("1 MiB") == 1024
+    assert vz.parse_size_kib("1 GiB") == 1024 * 1024
+    assert vz.parse_size_kib("1 GB") < vz.parse_size_kib("1 GiB")  # SI is smaller
+    assert vz.parse_size_kib("1 T") == 1024**3
+    assert vz.parse_size_kib("") is None
+    assert vz.parse_size_kib("n/a") is None
+    assert vz.parse_size_kib("8 XB") is None
+
+    # parse_capacity_gib — the Capacity row only, allocation/available ignored.
+    assert (
+        vz.parse_capacity_gib(
+            " Volume      t1_vda.qcow2\n Pool      vm-pool\n"
+            " Capacity: 8.0 GiB\n Allocation: 1.2 GiB\n"
+        )
+        == 8
+    )
+    assert vz.parse_capacity_gib(" Capacity: 16.0 GiB") == 16
+    assert vz.parse_capacity_gib(" Capacity: 8589934592 B") == 8  # domblkinfo bytes
+    assert vz.parse_capacity_gib("no capacity here") is None
+    assert vz.parse_capacity_gib("Capacity: n/a") is None
+
+    # parse_vm_spec — the facts `modify` plans from; disk_gib stays None because
+    # the size lives in the volume, and state stays empty for the caller to fill.
+    spec = vz.parse_vm_spec(VM_XML)
+    assert spec is not None
+    assert (spec.name, spec.uuid) == ("t1", "6f6da4d2-9d67-4d6a-9c1a-0f0f0f0f0f0f")
+    assert (spec.vcpu, spec.vcpu_max) == (2, 4)
+    assert (spec.ram_kib, spec.ram_max_kib, spec.ram_gib) == (
+        2 * 1024 * 1024,
+        2 * 1024 * 1024,
+        2,
+    )
+    assert spec.disk_target == "vda" and spec.disk_gib is None
+    assert spec.state == "" and spec.running is False
+    assert [i.document() for i in spec.interfaces] == [
+        {"type": "network", "source": "default", "mac": "52:54:00:aa:bb:cc"}
+    ]
+    assert spec.primary is spec.interfaces[0]
+    assert spec.document()["interfaces"][0]["mac"] == "52:54:00:aa:bb:cc"
+    # maxMemory (a guest with hot-plug headroom) is the live ceiling.
+    headroom = vz.parse_vm_spec(
+        VM_XML.replace(
+            "<currentMemory unit='KiB'>2097152</currentMemory>",
+            "<maxMemory slots='4' unit='KiB'>4194304</maxMemory>",
+        )
+    )
+    assert headroom.ram_kib == 2 * 1024 * 1024
+    assert headroom.ram_max_kib == 4 * 1024 * 1024
+    assert headroom.ram_gib == 2
+    # Foreign or broken input is not a VM, it is None.
+    assert vz.parse_vm_spec("") is None
+    assert vz.parse_vm_spec("<domain><name>x</name></domain>") is None
+    assert vz.parse_vm_spec("not xml at all") is None
+
+    # parse_net / parse_net_add / parse_mac — the accepted spellings, and the
+    # junk that must be a usage error before libvirt is ever called.
+    assert cm.parse_net("default") == vz.Interface("network", "default", "")
+    assert cm.parse_net("bridge=br0") == vz.Interface("bridge", "br0", "")
+    assert cm.parse_net_add("network=iso,mac=52:54:00:00:00:01") == vz.Interface(
+        "network", "iso", "52:54:00:00:00:01"
+    )
+    for bad in ("network=", "type=default", "", "network=default,mtu=1200"):
+        try:
+            (cm.parse_net_add if "," in bad else cm.parse_net)(bad)
+            raise AssertionError(f"expected UsageError for {bad!r}")
+        except click.UsageError:
+            pass
+    assert cm.parse_mac("52:54:00:AA:BB:CC") == "52:54:00:aa:bb:cc"
+    for bad_mac in ("52:54:00:aa:bb", "aa:bb:cc:dd:ee:ff:00", "zz:54:00:aa:bb:cc"):
+        try:
+            cm.parse_mac(bad_mac)
+            raise AssertionError(f"expected UsageError for {bad_mac!r}")
+        except click.UsageError:
+            pass
+
+    # plan_changes — vCPU/RAM are only live when libvirt allows it, so the
+    # ceiling decides `effective` before anything is executed.
+    ch, warn = cm.plan_changes(
+        vm_spec(), cm.Request(vcpu=3), live=False, auto_grow_fs=True
+    )
+    assert [(c.field, c.from_, c.to, c.effective) for c in ch] == [
+        ("vcpu", 2, 3, "on-boot")
+    ]
+    assert warn == ["vCPU change applies on next boot — consider --reboot"]
+    # `--reboot` makes the hint pointless, so it is not repeated in the plan.
+    _, warn = cm.plan_changes(
+        vm_spec(), cm.Request(vcpu=3), live=False, auto_grow_fs=True, reboot=True
+    )
+    assert warn == []
+    ch, _ = cm.plan_changes(vm_spec(), cm.Request(vcpu=3), live=True, auto_grow_fs=True)
+    assert ch[0].effective == "now"  # 3 <= <vcpu max> 4, domain running
+    ch, _ = cm.plan_changes(vm_spec(), cm.Request(vcpu=8), live=True, auto_grow_fs=True)
+    assert ch[0].effective == "on-boot"  # above the ceiling: needs a reboot
+    ch, _ = cm.plan_changes(
+        vm_spec(state="shut off"), cm.Request(vcpu=3), live=True, auto_grow_fs=True
+    )
+    assert ch[0].effective == "on-boot"
+    # RAM: 2 GiB <memory> and no <maxMemory> -> a grow cannot be live, a shrink can.
+    ch, _ = cm.plan_changes(
+        vm_spec(), cm.Request(ram_gib=4), live=True, auto_grow_fs=True
+    )
+    assert ch[0].effective == "on-boot"
+    ch, _ = cm.plan_changes(
+        vm_spec(), cm.Request(ram_gib=1), live=True, auto_grow_fs=True
+    )
+    assert ch[0].effective == "now"
+    ch, _ = cm.plan_changes(
+        vm_spec(ram_max_kib=4 * 1024 * 1024),
+        cm.Request(ram_gib=4),
+        live=True,
+        auto_grow_fs=True,
+    )
+    assert ch[0].effective == "now"
+
+    # Disk: grow only, and the guest filesystem is part of the same change.
+    ch, warn = cm.plan_changes(
+        vm_spec(), cm.Request(disk_gib=16), live=False, auto_grow_fs=True
+    )
+    assert ch[0].field == "disk_gib" and ch[0].to == 16
+    assert [op for op, _ in ch[0].ops] == ["disk", "fs-grow"]
+    assert ch[0].extra == {"fs_grown": None}
+    ch, warn = cm.plan_changes(
+        vm_spec(), cm.Request(disk_gib=16), live=False, auto_grow_fs=False
+    )
+    assert [op for op, _ in ch[0].ops] == ["disk"]
+    assert any("--no-auto-grow-fs" in w for w in warn), warn
+    # The same size is not a noop when the guest filesystem still has to grow:
+    # re-running `--disk 8` after an off-domain grow is how that finishes.
+    retry = cm.plan_changes(
+        vm_spec(), cm.Request(disk_gib=8), live=False, auto_grow_fs=True
+    )[0]
+    assert [(c.field, c.from_, c.to) for c in retry] == [("disk_gib", 8, 8)]
+    assert [op for op, _ in retry[0].ops] == ["fs-grow"]
+    try:
+        cm.plan_changes(
+            vm_spec(), cm.Request(disk_gib=8), live=False, auto_grow_fs=False
+        )
+        raise AssertionError("expected modify-noop")
+    except VirtError as e:
+        assert e.code == "modify-noop", e.code
+
+    # Shrinking and no-ops are refused with the documented codes.
+    try:
+        cm.plan_changes(
+            vm_spec(), cm.Request(disk_gib=4), live=False, auto_grow_fs=True
+        )
+        raise AssertionError("expected disk-shrink-unsupported")
+    except VirtError as e:
+        assert e.code == "disk-shrink-unsupported", e.code
+    try:
+        cm.plan_changes(vm_spec(), cm.Request(vcpu=2), live=True, auto_grow_fs=True)
+        raise AssertionError("expected modify-noop")
+    except VirtError as e:
+        assert e.code == "modify-noop", e.code
+    # A size we cannot read is never resized blindly.
+    try:
+        cm.plan_changes(
+            vm_spec(disk_gib=None),
+            cm.Request(disk_gib=16),
+            live=False,
+            auto_grow_fs=True,
+        )
+        raise AssertionError("expected runtime-error")
+    except VirtError as e:
+        assert e.code == "runtime-error", e.code
+
+    # Networking: the primary NIC is re-attached, NICs are added/removed, and
+    # the requests that would strand a VM are usage errors.
+    ch, _ = cm.plan_changes(
+        vm_spec(),
+        cm.Request(net=vz.Interface("bridge", "br0", "")),
+        live=False,
+        auto_grow_fs=True,
+    )
+    assert ch[0].field == "network" and ch[0].from_ == "default" and ch[0].to == "br0"
+    assert ch[0].effective == "now"  # a running guest is rewired live
+    old, new = ch[0].ops[0][1]
+    assert (old.source, new.source, new.mac, new.model) == (
+        "default",
+        "br0",
+        "52:54:00:aa:bb:cc",
+        "virtio",
+    )
+    ch, _ = cm.plan_changes(
+        vm_spec(), cm.Request(mac="52:54:00:00:00:09"), live=False, auto_grow_fs=True
+    )
+    assert [(c.field, c.to) for c in ch] == [("mac", "52:54:00:00:00:09")]
+    assert ch[0].ops[0][0] == "nic-replace"
+    # --net and --mac together: one rewiring, two reported fields, one op.
+    ch, _ = cm.plan_changes(
+        vm_spec(),
+        cm.Request(net=vz.Interface("network", "lan", ""), mac="52:54:00:00:00:09"),
+        live=False,
+        auto_grow_fs=True,
+    )
+    assert [c.field for c in ch] == ["network", "mac"]
+    assert [op for op, _ in ch[0].ops] == ["nic-replace"]
+    assert ch[1].ops == ()
+    # An unchanged network/MAC reports nothing, so a no-op is still a no-op.
+    try:
+        cm.plan_changes(
+            vm_spec(),
+            cm.Request(net=vz.Interface("network", "default", "")),
+            live=False,
+            auto_grow_fs=True,
+        )
+        raise AssertionError("expected modify-noop")
+    except VirtError as e:
+        assert e.code == "modify-noop", e.code
+    # Add + remove in one call, and a shut-off guest changes on-boot.
+    two = vm_spec(
+        interfaces=(
+            vz.Interface("network", "default", "52:54:00:aa:bb:cc"),
+            vz.Interface("network", "mgmt", "52:54:00:aa:bb:dd"),
+        )
+    )
+    ch, _ = cm.plan_changes(
+        two,
+        cm.Request(
+            remove=("52:54:00:aa:bb:dd",), add=(vz.Interface("bridge", "br1", ""),)
+        ),
+        live=False,
+        auto_grow_fs=True,
+    )
+    assert [(c.field, c.to) for c in ch] == [
+        ("interface", None),
+        ("interface", {"type": "bridge", "source": "br1", "mac": ""}),
+    ]
+    assert ch[1].to["mac"] == ""
+    ch, _ = cm.plan_changes(
+        vm_spec(state="shut off"),
+        cm.Request(net=vz.Interface("bridge", "br0", "")),
+        live=False,
+        auto_grow_fs=True,
+    )
+    assert ch[0].effective == "on-boot"
+    for bad_req, needle in (
+        (cm.Request(remove=("52:54:00:aa:bb:cc",)), "last interface"),
+        (cm.Request(remove=("52:54:00:ff:ff:ff",)), "no interface with MAC"),
+        (
+            cm.Request(add=(vz.Interface("network", "default", "52:54:00:aa:bb:cc"),)),
+            "already exists",
+        ),
+    ):
+        try:
+            cm.plan_changes(vm_spec(), bad_req, live=False, auto_grow_fs=True)
+            raise AssertionError(f"expected UsageError: {needle}")
+        except click.UsageError as e:
+            assert needle in str(e), str(e)
+
+    # apply_changes — a live refusal degrades to the config with a warning and
+    # effective on-boot; a failed NIC change is fatal, never silent.
+    fake = FakeVz()
+    ctx = cm.ApplyContext(
+        v=fake,
+        spec=vm_spec(),
+        volume="t1_vda.qcow2",
+        live=True,
+        user="ci",
+        identity="/id",
+        ip="192.168.122.11",
+    )
+    changes, _ = cm.plan_changes(
+        vm_spec(),
+        cm.Request(vcpu=3, ram_gib=4, disk_gib=16),
+        live=True,
+        auto_grow_fs=True,
+    )
+    cm.apply_changes(ctx, changes)
+    assert [c.effective for c in changes] == ["now", "on-boot", "now"], changes
+    assert changes[1].to == 4 and fake.ram_calls == [(4, True)]  # asked live
+    assert any("RAM change applies on next boot" in w for w in ctx.warnings), (
+        ctx.warnings
+    )
+    assert changes[0].extra == {}  # only a disk change reports fs_grown
+    assert changes[2].extra["fs_grown"] is True
+    assert fake.grown == [("ci", "192.168.122.11", "vda")]
+
+    # A powered-off guest: the volume grows, the filesystem does not, and the
+    # warning says how to finish the job.
+    off = FakeVz(running=False)
+    ctx_off = cm.ApplyContext(
+        v=off,
+        spec=vm_spec(state="shut off"),
+        volume="t1_vda.qcow2",
+        live=True,
+        user="ci",
+        identity="/id",
+        ip=None,
+    )
+    changes, _ = cm.plan_changes(
+        vm_spec(state="shut off"), cm.Request(disk_gib=16), live=True, auto_grow_fs=True
+    )
+    cm.apply_changes(ctx_off, changes)
+    assert off.disks == [("t1", "vda", "t1_vda.qcow2", 16)]
+    assert ctx_off.warnings and "boot it" in ctx_off.warnings[0], ctx_off.warnings
+    assert changes[0].extra["fs_grown"] is None
+
+    # A guest whose tools cannot grow: warning with the guest's own words.
+    stubborn = FakeVz(fs_code=1, fs_out="growpart is not installed")
+    ctx_stub = cm.ApplyContext(
+        v=stubborn,
+        spec=vm_spec(),
+        volume="t1_vda.qcow2",
+        live=False,
+        user="ci",
+        identity="/id",
+        ip="192.168.122.11",
+    )
+    changes, _ = cm.plan_changes(
+        vm_spec(), cm.Request(disk_gib=16), live=False, auto_grow_fs=True
+    )
+    cm.apply_changes(ctx_stub, changes)
+    assert changes[0].extra["fs_grown"] is False
+    assert any("growpart is not installed" in w for w in ctx_stub.warnings), (
+        ctx_stub.warnings
+    )
+
+    # Networking failures surface as net-change-failed with libvirt's reason.
+    broken = FakeVz(net_error="target device name was not found")
+    ctx_net = cm.ApplyContext(
+        v=broken,
+        spec=vm_spec(),
+        volume=None,
+        live=True,
+        user="ci",
+        identity="/id",
+        ip=None,
+    )
+    changes, _ = cm.plan_changes(
+        vm_spec(),
+        cm.Request(net=vz.Interface("bridge", "nope", "")),
+        live=True,
+        auto_grow_fs=True,
+    )
+    try:
+        cm.apply_changes(ctx_net, changes)
+        raise AssertionError("expected net-change-failed")
+    except VirtError as e:
+        assert e.code == "net-change-failed", e.code
+        assert "target device name was not found" in str(e), str(e)
+
+    # The command itself, against the fake: one JSON document, the documented
+    # codes, and nothing executed under --plan.
+    fake = FakeVz()
+    code, body = modify_cli(fake, ["t1", "--vcpu", "3", "--plan", "--json"])
+    assert code == 0 and body["status"] == "success", body
+    assert body["tool"] == "vm-modify" and body["error"] is None
+    assert body["planned"] is True and body["changes"][0]["field"] == "vcpu"
+    assert fake.vcpu_calls == [] and body["rebooted"] is False
+    assert body["vm"]["name"] == "t1" and body["vm"]["state"] == "running"
+    assert body["vm"]["ram_gib"] == 2 and body["vm"]["disk_gib"] == 8
+    # `ip` is the guest's current address (state, not change); without
+    # `--live` a running guest only picks the new count up on its next boot.
+    assert body["ip"] == "192.168.122.11", body
+    assert body["changes"][0]["effective"] == "on-boot"
+    assert body["warnings"] == ["vCPU change applies on next boot — consider --reboot"]
+
+    code, body = modify_cli(fake, ["t1", "--vcpu", "3", "--live", "--json"])
+    assert code == 0, body
+    assert fake.vcpu_calls == [(3, True, 4)]
+    assert body["changes"][0] == {
+        "field": "vcpu",
+        "from": 2,
+        "to": 3,
+        "effective": "now",
+    }
+
+    # Identity of the target comes first: nothing else is worth trying after.
+    assert modify_cli(FakeVz(), ["ghost", "--vcpu", "3", "--json"])[1]["error"][
+        "code"
+    ] == ("vm-not-found")
+    code, body = modify_cli(FakeVz(), ["foreign", "--ram", "4", "--json"])
+    assert code == 1 and body["error"]["code"] == "not-a-virt-runner-vm", body
+    assert modify_cli(FakeVz(), ["t1", "--disk", "4", "--json"])[1]["error"][
+        "code"
+    ] == ("disk-shrink-unsupported")
+    assert (
+        modify_cli(FakeVz(), ["t1", "--net-remove", "52:54:00:aa:bb:cc", "--json"])[1][
+            "error"
+        ]["code"]
+        == "usage"
+    )
+    code, body = modify_cli(FakeVz(), ["t1", "--vcpu", "2", "--json"])
+    assert code == 2 and body["error"]["code"] == "modify-noop", body
+    assert (
+        modify_cli(FakeVz(), ["t1", "--mac", "nope", "--json"])[1]["error"]["code"]
+        == "usage"
+    )
+    assert modify_cli(FakeVz(), ["t1", "--json"])[1]["error"]["code"] == "usage"
+    assert (
+        modify_cli(FakeVz(), ["t1", "--wait", "--json"])[1]["error"]["code"] == "usage"
+    )
+    assert (
+        modify_cli(FakeVz(), ["t1", "--vcpu", "0", "--json"])[1]["error"]["code"]
+        == "usage"
+    )
+
+    # --net with a name that is not a virtual network is retried as a bridge;
+    # --reboot --wait reports the fresh IP.
+    fake = FakeVz()
+    code, body = modify_cli(
+        fake, ["t1", "--net", "br-lan", "--reboot", "--wait", "--json"]
+    )
+    assert code == 0, body
+    assert ("detach", "network", "default", "52:54:00:aa:bb:cc", True) in fake.ifaces
+    assert ("attach", "bridge", "br-lan", "52:54:00:aa:bb:cc", True) in fake.ifaces
+    assert body["rebooted"] is True and body["ip"] == "192.168.122.99"
+    assert [c["field"] for c in body["changes"]] == ["network"]
+
+    # A shut-off guest: config-only, disk grows through the volume, and the
+    # warning tells the operator how to finish the filesystem.
+    off = FakeVz(running=False)
+    code, body = modify_cli(off, ["t1", "--disk", "16", "--ram", "4", "--json"])
+    assert code == 0, body
+    assert off.disks == [("t1", "vda", "t1_vda.qcow2", 16)]
+    assert {c["field"]: c["effective"] for c in body["changes"]} == {
+        "ram_gib": "on-boot",
+        "disk_gib": "now",
+    }
+    assert body["changes"][1]["fs_grown"] is None
+    assert any("is shut off" in w for w in body["warnings"]), body["warnings"]
+
+    # Text mode stays readable and says nothing about JSON.
+    from click.testing import CliRunner as _Runner
+
+    from virt_runner.cli import main as _cli
+
+    real = cm.Virtualizer
+    cm.Virtualizer = FakeVz
+    try:
+        res = _Runner().invoke(_cli, ["modify", "t1", "--vcpu", "3", "--live"])
+    finally:
+        cm.Virtualizer = real
+    assert res.exit_code == 0, res.output
+    assert "Modified: t1 (running)" in res.output and "vcpu: 2 -> 3 (now)" in res.output
+    assert "{" not in res.output
+
     # Usage errors raised inside the command body still honour --json (exit 2).
     from click.testing import CliRunner
 
@@ -546,7 +1162,13 @@ def main() -> None:
     # lists each command once, and a non-alias name is still a usage error.
     from virt_runner.cli import ALIASES
 
-    assert ALIASES == {"c": "create", "d": "destroy", "ls": "list", "s": "ssh"}
+    assert ALIASES == {
+        "c": "create",
+        "d": "destroy",
+        "ls": "list",
+        "s": "ssh",
+        "m": "modify",
+    }
     for alias, canonical in ALIASES.items():
         assert cli_main.get_command(None, alias) is cli_main.get_command(
             None, canonical

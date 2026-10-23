@@ -108,6 +108,24 @@ The process exits with ssh's exit code when non-zero. Errors carry `name` (and `
  "warnings": []}
 ```
 
+## modify (`vm-modify`)
+
+```json
+{"tool": "vm-modify", "status": "success", "error": null,
+ "vm": {"name": "dev", "uuid": "…", "state": "running", "vcpu": 2, "ram_gib": 2, "disk_gib": 8,
+        "interfaces": [{"type": "network", "source": "default", "mac": "52:54:00:…"}]},
+ "changes": [{"field": "disk_gib", "from": 8, "to": 16, "effective": "now", "fs_grown": true},
+             {"field": "vcpu", "from": 2, "to": 4, "effective": "on-boot"},
+             {"field": "mac", "from": "52:54:00:…", "to": "52:54:00:…", "effective": "now"}],
+ "rebooted": false, "planned": false, "ip": null, "warnings": []}
+```
+
+- `vm` is the state **before** the change (in a plan, the state as-is); `changes[].effective` is
+  `now` or `on-boot`, and `disk_gib` carries `fs_grown`: `true` grown, `false` attempted and
+  refused by the guest, `null` not attempted (`--no-auto-grow-fs`, guest powered off).
+- `ip` is the guest's address: the current one, or the freshly waited one with `--reboot --wait`.
+- `field` values: `vcpu`, `ram_gib`, `disk_gib`, `interface` (add/remove), `mac`.
+
 ## Exit codes
 
 `0` success · `1` runtime or preflight failure · `2` usage error. `ssh` additionally passes
@@ -143,3 +161,9 @@ through a non-zero ssh exit code.
 | `ssh-timeout` | SSH round-trip failed for 90 s | `virsh console NAME`; check cloud-init; right key/user; destroy afterwards |
 | `virtiofsd-missing` | `--mount` but no `/usr/libexec/virtiofsd` | `sudo apt install virtiofsd` (or `virt-runner setup`) |
 | `script-failed` | A `--script` exited non-zero (VM kept) | `virt-runner ssh NAME`, fix and re-run, or destroy |
+| `vm-not-found` | `modify` of a domain that is not defined | `virt-runner list`; the name may belong to a non-virt-runner domain |
+| `not-a-virt-runner-vm` | Domain exists but has no `vm-pool` disk and no virt-runner metadata | `modify` refuses it — manage that domain with `virsh` yourself |
+| `modify-noop` | Every option given already matches the VM (exit 2) | Nothing to do; a same-size `--disk` without `--no-auto-grow-fs` *is* a retry of the guest filesystem grow |
+| `disk-shrink-unsupported` | `modify --disk` smaller than the current volume | virt-runner never shrinks; recreate the VM if a smaller disk is really needed |
+| `net-change-failed` | `virsh attach-interface`/`detach-interface` failed | Check the network/bridge exists (`virsh net-list --all`, `ip link`); a half-rewired NIC is reported, not hidden |
+| `vm-reboot-failed` | `modify --reboot` could not power-cycle the domain | Changes are persisted; `virsh start NAME` (or `--reboot` again) |
