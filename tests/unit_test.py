@@ -1121,6 +1121,24 @@ def main() -> None:
     assert body["changes"][1]["fs_grown"] is None
     assert any("is shut off" in w for w in body["warnings"]), body["warnings"]
 
+    # `--no-auto-grow-fs` really turns the guest-side grow off (a negative flag
+    # is easy to wire to its own default): the volume/block device still grows,
+    # no SSH runs, `fs_grown` stays null and the warning carries the manual
+    # commands.
+    fake = FakeVz()
+    code, body = modify_cli(fake, ["t1", "--disk", "16", "--no-auto-grow-fs", "--json"])
+    assert code == 0, body
+    assert fake.disks == [("t1", "vda", "t1_vda.qcow2", 16)], fake.disks
+    assert fake.grown == [], fake.grown
+    assert body["changes"][0]["fs_grown"] is None, body["changes"]
+    assert any("--no-auto-grow-fs" in w for w in body["warnings"]), body["warnings"]
+    # Without the flag the same command does SSH into the guest to grow the fs.
+    fake = FakeVz()
+    code, body = modify_cli(fake, ["t1", "--disk", "16", "--json"])
+    assert code == 0, body
+    assert fake.grown == [("ci", "192.168.122.11", "vda")], fake.grown
+    assert body["changes"][0]["fs_grown"] is True, body["changes"]
+
     # Text mode stays readable and says nothing about JSON.
     from click.testing import CliRunner as _Runner
 

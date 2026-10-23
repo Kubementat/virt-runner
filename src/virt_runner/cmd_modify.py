@@ -8,7 +8,7 @@ applying leave the changes already made in the error document, because they are
 real resources that did change.
 
 Sizing follows libvirt's own ceiling rules (see
-``docs/lessons-learned/010-libvirt-sizing-ceilings.md``): a change that cannot
+``docs/lessons-learned/010-libvirt-live-vs-config-changes.md``): a change that cannot
 be applied to the running domain is written to the persisted config and
 reported as ``effective: "on-boot"`` with a warning instead of failing.
 """
@@ -431,9 +431,13 @@ def apply_changes(ctx: ApplyContext, changes: list[Change]) -> None:
     persisted change is fatal, as is a failed NIC change (a half-rewired guest
     must never look like success).
 
+    A failed guest-side filesystem grow is not fatal: the block device stays
+    grown, ``fs_grown`` is reported as ``false`` and the warning carries the
+    commands to finish the job inside the guest.
+
     Raises:
         RuntimeError: a sizing or disk change could not be persisted.
-        VirtError: ``net-change-failed``, ``fs-resize-failed``.
+        VirtError: ``net-change-failed``.
     """
     for change in changes:
         for kind, payload in change.ops:
@@ -657,6 +661,10 @@ def _mac_callback(ctx: Any, param: Any, value: str | None) -> str | None:
     "--no-auto-grow-fs",
     "auto_grow_fs",
     is_flag=True,
+    # The negative-flag pattern: passing the flag yields False, omitting it
+    # keeps the default. Without ``flag_value`` click hands back the default
+    # and the flag does nothing.
+    flag_value=False,
     default=True,
     help="Skip the guest-side filesystem grow after --disk (the guest tools "
     "may do it, or you may prefer to do it yourself)",

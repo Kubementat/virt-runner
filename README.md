@@ -104,7 +104,7 @@ virt-runner create NAME          # build + boot; --distro (ubuntu|arch|fedora),
                                  # --no-boot, --keep-going
 virt-runner destroy NAME         # undefine + delete disk (idempotent)
 virt-runner list                 # only VMs whose disk lives in vm-pool
-virt-runner modify NAME          # change an existing VM: --vcpu/--ram GiB/ count,
+virt-runner modify NAME          # change an existing VM: --vcpu COUNT, --ram GiB,
                                  # --disk GiB (grow only), --net NETWORK|bridge=NAME,
                                  # --net-add 'network=NAME[,mac=..]', --net-remove MAC,
                                  # --mac MAC, --no-auto-grow-fs, --live, --reboot,
