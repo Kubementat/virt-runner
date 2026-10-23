@@ -430,22 +430,34 @@ def main() -> None:
     assert "local-hostname: myvm" in meta
 
     # 1.8 — preflight accepts x86_64 and aarch64, refuses anything else.
-    v = Virtualizer()
-    v.host_arch = lambda: "riscv64"
+    # The virsh calls are stubbed: this file is the no-KVM suite and has to run
+    # on a box without a libvirt client, where a real spawn raises
+    # FileNotFoundError instead of VirtError. The arch gate is decided before
+    # any child process, so the stub only has to carry the empty tables.
+    real_spawn_pf = vz._spawn
     try:
-        v.preflight_check()
-        raise AssertionError("expected VirtError")
-    except VirtError as e:
-        assert e.code == "unsupported-arch", e.code
+        vz._spawn = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "", "")
 
-    # aarch64 passes the arch gate (any later failure is a different code —
-    # or nothing at all, when libvirt/pool/net are all up on this host).
-    v2 = Virtualizer()
-    v2.host_arch = lambda: "aarch64"
-    try:
-        v2.preflight_check()
-    except VirtError as e:
-        assert e.code != "unsupported-arch", e.code
+        v = Virtualizer()
+        v.host_arch = lambda: "riscv64"
+        try:
+            v.preflight_check()
+            raise AssertionError("expected VirtError")
+        except VirtError as e:
+            assert e.code == "unsupported-arch", e.code
+
+        # aarch64 clears the arch gate and stops at the next one: with an empty
+        # pool table that is pool-not-active — a different code, proving the
+        # arch check let it through.
+        v2 = Virtualizer()
+        v2.host_arch = lambda: "aarch64"
+        try:
+            v2.preflight_check()
+            raise AssertionError("expected pool-not-active from the stub table")
+        except VirtError as e:
+            assert e.code == "pool-not-active", e.code
+    finally:
+        vz._spawn = real_spawn_pf
 
     # _validate_user — good value passes through.
     assert _validate_user(None, None, "ubuntu") == "ubuntu"
