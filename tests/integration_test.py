@@ -13,6 +13,7 @@ hosts it is skipped and the Ubuntu + Fedora legs are the real aarch64 e2e.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -399,6 +400,277 @@ def main() -> None:
             doc, _ = virt_runner("ssh", name)
             check(doc["status"] == "success", f"ssh session into {name} closed cleanly")
             check(doc["exit_code"] == 0, f"ssh session into {name} exited 0")
+
+        # 3d. `modify`: sizing, disk growth and a NIC round trip on one running
+        # VM — planned, refused, applied, then verified inside the guest.
+        name = NAMES[0]
+        doc, rc = virt_runner("modify", name, "--vcpu", "2", "--plan", "--json")
+        check(doc["planned"] is True, f"modify --plan applies nothing ({name})")
+        check(
+            [c["field"] for c in doc["changes"]] == ["vcpu"],
+            f"modify --plan reports the vcpu change, got {doc['changes']}",
+        )
+        check(
+            doc["vm"]["vcpu"] == 1, f"{name} still has its old vcpu count in the report"
+        )
+        check(
+            int(ssh_run(vm_a2["ssh_command"], "nproc").strip()) == 1,
+            f"{name} still runs with 1 vcpu after --plan",
+        )
+
+        for bad, code, rc_want in (
+            (["--disk", "4"], "disk-shrink-unsupported", 1),
+            (["--vcpu", "1"], "modify-noop", 2),
+            # libvirt would write this into the config without a word, and only
+            # the next boot would find out — so `modify` refuses it up front.
+            (["--ram", "100000"], "runtime-error", 1),
+            (["--mac", "99"], "usage", 2),
+            (["--net-remove", "52:54:00:de:ad:be"], "usage", 2),
+            # The VM's own single NIC: removing it would strand the guest.
+            (["--net-remove", vm_a2["mac"]], "usage", 2),
+        ):
+            doc, rc = virt_runner("modify", name, *bad, allow_fail=True)
+            check(
+                rc == rc_want and doc["error"]["code"] == code,
+                f"modify {name} {' '.join(bad)} is {code} (exit {rc_want}), "
+                f"got {doc['error'] or 'success'} / {rc}",
+            )
+        doc, rc = virt_runner(
+            "modify", "it-never-existed", "--vcpu", "2", allow_fail=True
+        )
+        check(
+            rc == 1 and doc["error"]["code"] == "vm-not-defined",
+            f"modify of an undefined VM is vm-not-defined, got {doc['error']} / {rc}",
+        )
+
+        # `--reboot` on its own is a request, not a noop: the config is already
+        # right and rebooting is what makes it real.
+        doc, rc = virt_runner("modify", name, "--reboot", "--wait")
+        check(
+            rc == 0 and doc["rebooted"] is True and doc["changes"] == [],
+            f"modify --reboot alone power-cycles without a change, got {doc}",
+        )
+
+        # Config-vs-live drift, which is what a config-only change that nobody
+        # ever rebooted into looks like: the *config* is what `modify` compares
+        # against, so a second identical request is still a pending change with
+        # the running number as `from`, never a noop — and the guest proves it is
+        # still small.
+        doc, _ = virt_runner("modify", name, "--ram", "2")
+        check(
+            doc["status"] == "success"
+            and doc["changes"][0]["field"] == "ram_gib"
+            and doc["changes"][0]["effective"] == "on-boot",
+            f"a config-only RAM change reports on-boot, got {doc['changes']}",
+        )
+        doc, _ = virt_runner("list")
+        running = next(v for v in doc["vms"] if v["name"] == name)
+        mem_mib = int(
+            ssh_run(
+                running["ssh_command"],
+                "awk '/MemTotal/{print int($2/1024)}' /proc/meminfo",
+            ).strip()
+        )
+        check(
+            mem_mib < 1500,
+            f"{name} still runs on 1 GiB after a config-only grow, got {mem_mib} MiB",
+        )
+        doc, rc = virt_runner("modify", name, "--ram", "2", allow_fail=True)
+        check(
+            rc == 0
+            and [(c["from"], c["to"], c["effective"]) for c in doc["changes"]]
+            == [(1, 2, "on-boot")],
+            f"re-asking for what the config already has is a pending change, not a noop, got {doc['changes']}",
+        )
+
+        # One call: 1->2 vcpu, 1->2 GiB RAM, 8->16 GiB disk, live where libvirt
+        # allows, then a reboot so the guest sees everything and grows its own
+        # filesystem into the new space.
+        doc, _ = virt_runner(
+            "modify",
+            name,
+            "--vcpu",
+            "2",
+            "--ram",
+            "2",
+            "--disk",
+            "16",
+            "--live",
+            "--reboot",
+            "--wait",
+        )
+        check(
+            doc["rebooted"] is True and doc["ip"] is not None,
+            f"{name} rebooted and has an IP",
+        )
+        fields = {c["field"]: c for c in doc["changes"]}
+        check(
+            set(fields) == {"vcpu", "ram_gib", "disk_gib"},
+            f"modify reports all three changes, got {sorted(fields)}",
+        )
+        check(
+            fields["disk_gib"]["to"] == 16 and fields["disk_gib"]["from"] == 8,
+            f"disk grew 8 -> 16, got {fields['disk_gib']}",
+        )
+        check(
+            fields["disk_gib"]["fs_grown"] is True,
+            f"guest filesystem reported grown, got {fields['disk_gib']}",
+        )
+        # Everything asked for is now the current config for the *sizing*: asking
+        # for 2 vCPU and 2 GiB again has nothing left to do, which is the
+        # persistence check. The disk is left out — re-issuing `--disk` is the
+        # filesystem-grow retry, and by contract that is a change, not a noop.
+        doc, rc = virt_runner(
+            "modify", name, "--vcpu", "2", "--ram", "2", allow_fail=True
+        )
+        check(
+            rc == 2 and doc["error"]["code"] == "modify-noop",
+            f"the new sizing is persisted ({name}), got {doc['error']} / {rc}",
+        )
+        # The documented retry: same size, no block resize, guest-side grow again.
+        # A partition that is already at full size is a success (growpart says
+        # "no space left to grow into"), so it must not come back refused.
+        doc, rc = virt_runner("modify", name, "--disk", "16")
+        check(
+            doc["status"] == "success"
+            and [
+                (c["field"], c["from"], c["to"], c["effective"]) for c in doc["changes"]
+            ]
+            == [("disk_gib", 16, 16, "now")],
+            f"re-issuing --disk 16 is a filesystem-only grow, got {doc['changes']}",
+        )
+        check(
+            doc["changes"][0]["fs_grown"] is True,
+            f"an already-grown filesystem reports grown, got {doc['changes'][0]}",
+        )
+        doc, _ = virt_runner("list")
+        vm = next(vm for vm in doc["vms"] if vm["name"] == name)
+        # `df -B1 /` and take the size column of the single data row: `--output`=
+        # is a coreutils-version trap and prints a `1G-blocks` header line that
+        # would poison the field unpacking below.
+        out = ssh_run(
+            vm["ssh_command"],
+            "nproc; awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo; "
+            "lsblk -bdno SIZE /dev/vda; df -B1 / | awk 'NR==2 {print $2}'; "
+            "mountpoint -q /mnt/share && echo remounted",
+        )
+        vcpu_n, mem_mib, disk_bytes, root_bytes, share_line = out.split()
+        check(vcpu_n == "2", f"{name} runs with 2 vcpus inside the guest, got {vcpu_n}")
+        check(
+            1700 <= int(mem_mib) <= 2048,
+            f"{name} sees ~2 GiB RAM inside the guest, got {mem_mib} MiB",
+        )
+        check(
+            int(disk_bytes) == 16 * 1024**3,
+            f"{name}'s /dev/vda is 16 GiB, got {disk_bytes} bytes",
+        )
+        check(
+            int(root_bytes) >= 14 * 1024**3,
+            f"{name}'s root filesystem grew into the disk, got {root_bytes} bytes",
+        )
+        check("remounted" in share_line, f"{name} still mounts the virtiofs share")
+
+        # Networking round trip on the live guest: attach a second NIC with a
+        # fixed MAC, see it inside the guest, detach it again.
+        extra_mac = "52:54:00:12:34:56"
+        doc, _ = virt_runner(
+            "modify", name, "--net-add", f"network=default,mac={extra_mac}"
+        )
+        check(
+            [c["field"] for c in doc["changes"]] == ["interface"]
+            and doc["changes"][0]["to"]["mac"] == extra_mac,
+            f"modify --net-add reports the new interface, got {doc['changes']}",
+        )
+        check(
+            doc["changes"][0]["effective"] == "now",
+            f"a running VM's NIC is added live, got {doc['changes'][0]}",
+        )
+        nics = ssh_run(vm["ssh_command"], "ls /sys/class/net | grep -c '^eth\\|^en'")
+        check(
+            nics.strip() == "2",
+            f"{name} shows 2 NICs inside the guest, got {nics.strip()}",
+        )
+        doc, _ = virt_runner("modify", name, "--net-remove", extra_mac)
+        check(
+            doc["changes"][0]["from"]["mac"] == extra_mac,
+            f"modify --net-remove reports the removed interface, got {doc['changes']}",
+        )
+        nics = ssh_run(vm["ssh_command"], "ls /sys/class/net | grep -c '^eth\\|^en'")
+        check(
+            nics.strip() == "1",
+            f"{name} is back to 1 NIC inside the guest, got {nics.strip()}",
+        )
+
+        # `--no-auto-grow-fs`: the block device grows, the guest is left alone
+        # and the report says so instead of pretending otherwise.
+        doc, _ = virt_runner("modify", name, "--disk", "20", "--no-auto-grow-fs")
+        check(
+            doc["changes"][0]["field"] == "disk_gib"
+            and doc["changes"][0]["fs_grown"] is None,
+            f"--no-auto-grow-fs reports no filesystem grow, got {doc['changes']}",
+        )
+        check(
+            any("--no-auto-grow-fs" in w for w in doc["warnings"]),
+            f"--no-auto-grow-fs warns with the manual commands, got {doc['warnings']}",
+        )
+        out = ssh_run(
+            vm["ssh_command"],
+            "lsblk -bdno SIZE /dev/vda; df -B1 / | awk 'NR==2 {print $2}'",
+        )
+        disk_bytes, root_bytes = out.split()
+        check(
+            int(disk_bytes) == 20 * 1024**3,
+            f"{name}'s /dev/vda grew to 20 GiB without the guest fs, got {disk_bytes}",
+        )
+        check(
+            int(root_bytes) < 20 * 1024**3,
+            f"{name}'s root fs stayed as it was, got {root_bytes} bytes",
+        )
+
+        # 3e. The same change set on a powered-off guest: every change lands in
+        # the persisted config and nothing claims to be live. `it-vm-b` is the
+        # victim — its failing script already served its purpose.
+        off = NAMES[1]
+        subprocess.run(["virsh", "destroy", off], capture_output=True, check=False)
+        state = subprocess.run(
+            ["virsh", "domstate", off], capture_output=True, text=True, check=False
+        ).stdout.strip()
+        check(state == "shut off", f"{off} is off for the config-only leg, got {state}")
+        off_mac = "52:54:00:ab:cd:ef"
+        doc, _ = virt_runner(
+            "modify",
+            off,
+            "--vcpu",
+            "2",
+            "--ram",
+            "2",
+            "--net-add",
+            f"network=default,mac={off_mac}",
+        )
+        check(
+            [c["field"] for c in doc["changes"]] == ["vcpu", "ram_gib", "interface"]
+            and all(c["effective"] == "on-boot" for c in doc["changes"]),
+            f"a shut-off guest changes on-boot only, got {doc['changes']}",
+        )
+        xml = subprocess.run(
+            ["virsh", "dumpxml", "--inactive", off],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        check(
+            re.search(r"<vcpu[^>]*>2</vcpu>", xml) is not None,
+            f"{off} persisted 2 vcpus in its config XML, got the <vcpu> of: "
+            f"{re.search(r'<vcpu[^>]*>[^<]*</vcpu>', xml)}",
+        )
+        check(off_mac in xml, f"{off} persisted the added NIC in its config XML")
+        doc, rc = virt_runner(
+            "modify", off, "--vcpu", "2", "--ram", "2", allow_fail=True
+        )
+        check(
+            rc == 2 and doc["error"]["code"] == "modify-noop",
+            f"the shut-off config changes are persisted ({off}), got {doc['error']}",
+        )
 
         # 4. Destroy all.
         for name in ALL:
