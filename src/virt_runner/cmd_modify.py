@@ -1,16 +1,17 @@
 """``modify`` subcommand — change vCPU, RAM, disk size and networking of a VM.
 
 Everything that decides *what* would change lives in pure functions
-(:func:`parse_request`, :func:`plan_changes`, :func:`resolve_net`); the Click
-command only reads the current :class:`~virt_runner.virtualizer.VmSpec`, hands
-the plan to :func:`apply_changes` and renders the result. Failures raised while
-applying leave the changes already made in the error document, because they are
-real resources that did change.
+(:class:`Request`, :func:`plan_changes`, :func:`resolve_net`); the Click command
+only reads the current :class:`~virt_runner.virtualizer.VmSpec`, hands the plan
+to :func:`apply_changes` and renders the result. A failure while applying leaves
+the changes that really ran in the error document and marks the ones that did not
+with ``applied: false`` — both are facts about real resources.
 
 Sizing follows libvirt's own ceiling rules (see
-``docs/lessons-learned/010-libvirt-live-vs-config-changes.md``): a change that cannot
-be applied to the running domain is written to the persisted config and
-reported as ``effective: "on-boot"`` with a warning instead of failing.
+``docs/lessons-learned/010-libvirt-live-vs-config-changes.md`` and
+``docs/lessons-learned/013-virsh-option-spelling.md``): a change that cannot be
+applied to the running domain is written to the persisted config and reported as
+``effective: "on-boot"`` with a warning instead of failing.
 """
 
 from __future__ import annotations
@@ -144,14 +145,10 @@ def resolve_net(v: Virtualizer, iface: Interface) -> Interface:
 
     A bare name is checked against the defined virtual networks so that a typo
     is reported here instead of as a failed attach; an explicit ``bridge=`` is
-    trusted as written (libvirt validates it).
+    trusted as written (libvirt validates it). The caller turns the substitution
+    into a warning — see :func:`_with_net`.
     """
     if iface.type == "network" and not v.network_defined(iface.source):
-        click.echo(
-            f"virt-runner: '{iface.source}' is not a defined network — attaching it "
-            "as a bridge of that name",
-            err=True,
-        )
         return Interface(type="bridge", source=iface.source, mac=iface.mac)
     return iface
 
@@ -176,6 +173,10 @@ class Change:
     effective: str
     ops: tuple[tuple[str, Any], ...] = ()
     extra: dict[str, Any] = field(default_factory=dict)
+    #: `None` = "nothing was asked to run" (a plan), True = really applied,
+    #: False = asked for but never reached. Only False is ever written down, so
+    #: a normal success document stays as clean as it always was.
+    applied: bool | None = None
 
     def document(self) -> dict[str, Any]:
         """The ``changes[]`` entry of the ``vm-modify`` document."""
@@ -185,6 +186,8 @@ class Change:
             "to": self.to,
             "effective": self.effective,
         }
+        if self.applied is False:
+            entry["applied"] = False
         entry.update(self.extra)
         return entry
 
@@ -211,38 +214,65 @@ def plan_changes(
 
     Raises:
         VirtError: ``disk-shrink-unsupported`` (a smaller ``--disk``) or
-            ``modify-noop`` (every requested value is already set).
+            ``modify-noop`` (every requested value is already set — never
+            raised when ``reboot`` was asked for, which has work to do).
         click.UsageError: a MAC that does not exist, or removing the last NIC.
     """
     changes: list[Change] = []
     warnings: list[str] = []
     running = spec.running
 
-    if req.vcpu is not None and req.vcpu != spec.vcpu:
-        # A live change is impossible above the domain's current maximum: that
-        # ceiling is fixed until the guest reboots.
-        can_live = live and running and req.vcpu <= spec.vcpu_max
-        changes.append(
-            Change(
-                "vcpu",
-                spec.vcpu,
-                req.vcpu,
-                EFFECTIVE_NOW if can_live else EFFECTIVE_ON_BOOT,
-                (("vcpu", req.vcpu),),
+    # A sizing request is compared to the *config*, because that is what the
+    # change writes. The running guest may be behind it — a config-only change
+    # that was never rebooted into, or a `virsh setmem --live` by someone with
+    # the client — and then the right answer is "that is already in the config,
+    # reboot it", not "nothing to do".
+    vcpu_cfg = spec.config_vcpu or spec.vcpu
+    # `from` is the value that still disagrees with the request: the config, when
+    # that is what is wrong, otherwise what the guest runs.
+    vcpu_from = vcpu_cfg if vcpu_cfg != req.vcpu else spec.vcpu
+    if req.vcpu is not None and (req.vcpu != spec.vcpu or req.vcpu != vcpu_cfg):
+        if req.vcpu == vcpu_cfg:
+            changes.append(Change("vcpu", vcpu_from, req.vcpu, EFFECTIVE_ON_BOOT))
+        else:
+            # A live change is impossible above the domain's current maximum: that
+            # ceiling is fixed until the guest reboots.
+            can_live = (
+                live and running and req.vcpu != spec.vcpu and req.vcpu <= spec.vcpu_max
             )
-        )
+            changes.append(
+                Change(
+                    "vcpu",
+                    vcpu_from,
+                    req.vcpu,
+                    EFFECTIVE_NOW if can_live else EFFECTIVE_ON_BOOT,
+                    (("vcpu", req.vcpu),),
+                )
+            )
 
-    if req.ram_gib is not None and req.ram_gib != spec.ram_gib:
-        can_live = live and running and req.ram_gib * 1024 * 1024 <= spec.ram_max_kib
-        changes.append(
-            Change(
-                "ram_gib",
-                spec.ram_gib,
-                req.ram_gib,
-                EFFECTIVE_NOW if can_live else EFFECTIVE_ON_BOOT,
-                (("ram", req.ram_gib),),
+    ram_cfg_gib = spec.config_ram_gib
+    ram_from = ram_cfg_gib if ram_cfg_gib != req.ram_gib else spec.ram_gib
+    if req.ram_gib is not None and (
+        req.ram_gib != spec.ram_gib or req.ram_gib != ram_cfg_gib
+    ):
+        if req.ram_gib == ram_cfg_gib:
+            changes.append(Change("ram_gib", ram_from, req.ram_gib, EFFECTIVE_ON_BOOT))
+        else:
+            can_live = (
+                live
+                and running
+                and req.ram_gib != spec.ram_gib
+                and req.ram_gib * 1024 * 1024 <= spec.ram_max_kib
             )
-        )
+            changes.append(
+                Change(
+                    "ram_gib",
+                    ram_from,
+                    req.ram_gib,
+                    EFFECTIVE_NOW if can_live else EFFECTIVE_ON_BOOT,
+                    (("ram", req.ram_gib),),
+                )
+            )
 
     if req.disk_gib is not None:
         _plan_disk(spec, req.disk_gib, auto_grow_fs, changes, warnings)
@@ -252,9 +282,14 @@ def plan_changes(
     if not reboot:
         warnings.extend(_on_boot_warnings(spec, changes))
 
-    if not changes:
+    # `--reboot` on its own is a legitimate request: the change is already in the
+    # config, and rebooting is what makes it real. Without this the command's own
+    # "pass at least one option" guard and the noop check contradict each other.
+    if not changes and not reboot:
         raise VirtError(
-            f"nothing to change: every value given is already set on '{spec.name}'",
+            f"nothing to change: every value given is already set on '{spec.name}'\n"
+            f"hint: to apply what is already in the config, run "
+            f"'virt-runner modify {spec.name} --reboot --wait'",
             "modify-noop",
         )
     return changes, warnings
@@ -439,27 +474,36 @@ def apply_changes(ctx: ApplyContext, changes: list[Change]) -> None:
         RuntimeError: a sizing or disk change could not be persisted.
         VirtError: ``net-change-failed``.
     """
-    for change in changes:
-        for kind, payload in change.ops:
-            if kind == "vcpu":
-                _apply_vcpu(ctx, change, payload)
-            elif kind == "ram":
-                _apply_ram(ctx, change, payload)
-            elif kind == "disk":
-                ctx.v.grow_disk(
-                    ctx.spec.name, ctx.spec.disk_target, ctx.volume, payload
-                )
-            elif kind == "fs-grow":
-                _apply_fs_grow(ctx, change)
-            elif kind == "detach":
-                _run_live_then_config(ctx, change, ctx.v.detach_interface, payload)
-            elif kind == "attach":
-                _run_live_then_config(ctx, change, ctx.v.attach_interface, payload)
-            elif kind == "nic-replace":
-                old, new = payload
-                _run_live_then_config(ctx, change, ctx.v.detach_interface, old)
-                _run_live_then_config(ctx, change, ctx.v.attach_interface, new)
-        _warn_on_boot(ctx, change)
+    try:
+        for change in changes:
+            for kind, payload in change.ops:
+                if kind == "vcpu":
+                    _apply_vcpu(ctx, change, payload)
+                elif kind == "ram":
+                    _apply_ram(ctx, change, payload)
+                elif kind == "disk":
+                    ctx.v.grow_disk(
+                        ctx.spec.name, ctx.spec.disk_target, ctx.volume, payload
+                    )
+                elif kind == "fs-grow":
+                    _apply_fs_grow(ctx, change)
+                elif kind == "detach":
+                    _run_live_then_config(ctx, change, ctx.v.detach_interface, payload)
+                elif kind == "attach":
+                    _run_live_then_config(ctx, change, ctx.v.attach_interface, payload)
+                elif kind == "nic-replace":
+                    old, new = payload
+                    _replace_nic(ctx, change, old, new)
+            change.applied = True
+            _warn_on_boot(ctx, change)
+    except Exception:
+        # Anything that did not finish — the op that raised included — is a
+        # request, not a change. Marking it keeps the error document honest
+        # about what really happened to the VM.
+        for change in changes:
+            if not change.applied:
+                change.applied = False
+        raise
 
 
 def _apply_vcpu(ctx: ApplyContext, change: Change, vcpu: int) -> None:
@@ -476,10 +520,38 @@ def _apply_ram(ctx: ApplyContext, change: Change, ram_gib: int) -> None:
     change.effective = (
         EFFECTIVE_NOW
         if ctx.v.set_ram_gib(
-            ctx.spec.name, ram_gib, live=ctx.live, ceiling=ctx.spec.ram_max_kib
+            ctx.spec.name,
+            ram_gib,
+            live=ctx.live,
+            ceiling=ctx.spec.ram_max_kib,
+            config_ceiling=ctx.spec.config_ram_kib,
         )
         else EFFECTIVE_ON_BOOT
     )
+
+
+def _replace_nic(
+    ctx: ApplyContext, change: Change, old: Interface, new: Interface
+) -> None:
+    """Move a NIC, but only if the replacement target is actually usable.
+
+    The order is the whole point: libvirt only notices a missing network or
+    bridge when it attaches, which is **after** the detach succeeded — leaving a
+    running guest with no interface at all while the command reports success.
+    Checking the target first turns that into a refusal that changes nothing.
+
+    Raises:
+        VirtError: ``net-change-failed`` when the target does not exist.
+    """
+    if not ctx.v.interface_target_exists(new):
+        raise VirtError(
+            f"cannot move '{old.mac}' to {new.type}={new.source} of "
+            f"'{ctx.spec.name}': no such virtual network or bridge on this host "
+            "(see 'virsh net-list --all' / 'ip link') — nothing was changed",
+            "net-change-failed",
+        )
+    _run_live_then_config(ctx, change, ctx.v.detach_interface, old)
+    _run_live_then_config(ctx, change, ctx.v.attach_interface, new)
 
 
 def _run_live_then_config(
@@ -642,7 +714,8 @@ def _mac_callback(ctx: Any, param: Any, value: str | None) -> str | None:
     "--reboot",
     is_flag=True,
     default=False,
-    help="Power-cycle the VM after the changes (starts it when it was off)",
+    help="Reboot the VM after the changes so on-boot changes land "
+    "(shuts it down first when it was off; works on its own)",
 )
 @click.option(
     "--wait",
@@ -729,12 +802,12 @@ def cmd_modify(
         v.require_libvirt()
         v.require_pool_defined()
         if not v.domain_exists(name):
-            # The card's code for this case is `vm-not-found`; `destroy`/`ssh`
-            # say `vm-not-defined` for the same condition.
+            # Same condition, same code as `destroy`/`ssh`: a script that cleans
+            # up idempotently must not have to know two spellings for "gone".
             output.fail(
                 "modify",
                 f"VM '{name}' is not defined",
-                code="vm-not-found",
+                code="vm-not-defined",
                 text=f"VM '{name}' is not defined",
                 fields={"name": name},
             )
@@ -750,9 +823,10 @@ def cmd_modify(
     except RuntimeError as exc:
         output.fail_with("modify", exc, "libvirt-unreachable", fields={"name": name})
 
+    net_note = ""
     try:
         if req.net is not None:
-            req = _with_net(v, req)
+            req, net_note = _with_net(v, req)
         changes, warnings = plan_changes(
             spec, req, live=live, auto_grow_fs=auto_grow_fs, reboot=reboot
         )
@@ -764,6 +838,10 @@ def cmd_modify(
             exit_code=_NOOP_EXIT if exc.code == "modify-noop" else 1,
             fields={"vm": spec.document(), "planned": planned},
         )
+    if net_note:
+        # A substitution the user did not ask for belongs in the document, not
+        # only in stderr — a caller that reads `--json` would miss it entirely.
+        warnings.insert(0, net_note)
 
     # The guest's current address: useful in a plan, and what the filesystem
     # grow (and ``--wait``) needs. After a reboot it is refreshed or re-waited.
@@ -790,17 +868,37 @@ def cmd_modify(
     try:
         apply_changes(ctx, changes)
     except RuntimeError as exc:
-        # Whatever was applied before the failure is real — report it.
+        # Whatever was applied before the failure is real, and what was not did
+        # not happen — say both, or the document reads like a no-op run.
+        skipped = [c.field for c in changes if c.applied is False]
+        note = f"not applied: {', '.join(skipped)} (the run stopped here)"
+        if skipped:
+            ctx.warnings.append(note)
         output.fail_with(
             "modify",
             exc,
             "runtime-error",
+            text=f"vm-modify: {exc}; {note}" if skipped else None,
             fields={
                 "vm": spec.document(),
                 "changes": [c.document() for c in changes],
                 "warnings": ctx.warnings,
             },
         )
+
+    # A live MAC change moved the address: the lease read before the change is
+    # already pointing at the guest's former self.
+    if not reboot and any(
+        c.field == "mac" and c.effective == EFFECTIVE_NOW for c in changes
+    ):
+        try:
+            ip = v.wait_for_ip(
+                name, _primary_mac(changes, spec), lease_file("modify"), 30
+            )
+        except RuntimeError:
+            ctx.warnings.append(
+                "no lease yet for the new MAC — run 'virt-runner list' for the guest's address"
+            )
 
     rebooted = False
     if reboot:
@@ -849,18 +947,33 @@ def cmd_modify(
     )
 
 
-def _with_net(v: Virtualizer, req: Request) -> Request:
-    """Resolve ``--net NAME`` to network/bridge before planning (needs libvirt)."""
+def _with_net(v: Virtualizer, req: Request) -> tuple[Request, str]:
+    """Resolve ``--net NAME`` to network/bridge before planning (needs libvirt).
+
+    Returns the rewritten request plus a warning when a name libvirt does not
+    know is being attached as a bridge of that name.
+    """
     assert req.net is not None
-    resolved = resolve_net(v, req.net)
-    return Request(
-        vcpu=req.vcpu,
-        ram_gib=req.ram_gib,
-        disk_gib=req.disk_gib,
-        net=resolved,
-        mac=req.mac,
-        add=req.add,
-        remove=req.remove,
+    wanted = req.net
+    resolved = resolve_net(v, wanted)
+    note = ""
+    if resolved.type != wanted.type:
+        note = (
+            f"'{wanted.source}' is not a defined virtual network, so the NIC is "
+            f"attached as a bridge of that name — it must exist on the host "
+            "('ip link')"
+        )
+    return (
+        Request(
+            vcpu=req.vcpu,
+            ram_gib=req.ram_gib,
+            disk_gib=req.disk_gib,
+            net=resolved,
+            mac=req.mac,
+            add=req.add,
+            remove=req.remove,
+        ),
+        note,
     )
 
 

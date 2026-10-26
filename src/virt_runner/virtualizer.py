@@ -289,11 +289,23 @@ class VmSpec:
     disk_target: str
     disk_gib: int | None
     interfaces: tuple[Interface, ...] = ()
+    #: What the **persisted config** says, as opposed to what the guest runs
+    #: (`vcpu`/`ram_kib` above). Zero = unknown (a shut-off domain, where both
+    #: views are one domain). A running domain can be behind its own config, and
+    #: comparing a request to the running value alone would call that "already
+    #: set" while the next boot gets something else entirely.
+    config_vcpu: int = 0
+    config_ram_kib: int = 0
 
     @property
     def running(self) -> bool:
         """True when the domain is powered on."""
         return self.state == STATE_RUNNING
+
+    @property
+    def config_ram_gib(self) -> int:
+        """The RAM the next boot gets, in GiB (falls back to the live size)."""
+        return int(round((self.config_ram_kib or self.ram_kib) / 1024 / 1024))
 
     @property
     def primary(self) -> Interface | None:
@@ -337,8 +349,12 @@ def parse_vm_spec(xml_text: str) -> VmSpec | None:
     vcpu_max = _int(vcpu_el.text)
     vcpu = _int(vcpu_el.get("current")) or vcpu_max
 
-    ram_kib = parse_size_kib(root.findtext("memory"), "KiB") or 0
-    ram_max_kib = parse_size_kib(root.findtext("maxMemory"), "KiB") or ram_kib
+    memory_kib = parse_size_kib(root.findtext("memory"), "KiB") or 0
+    # The *current* size of a running domain is <currentMemory>; <memory> is what
+    # the next boot gets. Reading <memory> here is how a config-only RAM change
+    # reads back as "already set" while the guest still runs the old size.
+    ram_kib = parse_size_kib(root.findtext("currentMemory"), "KiB") or memory_kib
+    ram_max_kib = parse_size_kib(root.findtext("maxMemory"), "KiB") or memory_kib
 
     interfaces: list[Interface] = []
     for el in root.iterfind("devices/interface"):
@@ -519,6 +535,8 @@ class Virtualizer:
 
     POOL = "vm-pool"
     NET = "default"
+    #: How long a cooperative ``virsh shutdown`` gets before ``destroy`` does it.
+    REBOOT_GRACE_S = 60
     # Namespace of the per-VM metadata recorded at create time (libvirt's
     # `virsh metadata`; the old setmeta/dommetadata are gone in libvirt 10).
     METADATA_URI = "https://virt-runner.local/vm"
@@ -1187,22 +1205,39 @@ class Virtualizer:
 
     @staticmethod
     def _parse_json_lease(content: str, mac_lower: str) -> str | None:
-        """Parse JSON-format dnsmasq lease file."""
+        """Parse JSON-format dnsmasq lease file.
+
+        A MAC can have several entries: dnsmasq records a renewal as a new line
+        and keeps the previous one until it expires, and the two can carry
+        different client-ids (the plain MAC, plus the DUID cloud-init sends).
+
+        **The freshest lease wins** — picking the first means reporting an
+        address the guest gave up, which surfaces as an SSH timeout, not as a
+        wrong answer.
+        """
         try:
             leases = json.loads(content)
         except json.JSONDecodeError:
             return None
         if not isinstance(leases, list):
             return None
+        best: str | None = None
+        best_expiry = -1
         for lease in leases:
             if not isinstance(lease, dict):
                 continue
             if str(lease.get("mac-address", "")).lower() != mac_lower:
                 continue
             ip = lease.get("ip-address")
-            if ip:
-                return ip
-        return None
+            if not ip:
+                continue
+            try:
+                expiry = int(lease.get("expiry-time") or 0)
+            except (TypeError, ValueError):
+                expiry = 0
+            if expiry >= best_expiry:
+                best, best_expiry = str(ip), expiry
+        return best
 
     @staticmethod
     def _parse_legacy_lease(content: str, mac_lower: str) -> str | None:
@@ -1576,16 +1611,43 @@ class Virtualizer:
         if spec is None:
             return None
         volume = self.disk_volume(name)
-        return replace(
+        state = self.get_domain_state(name)
+        spec = replace(
             spec,
             name=name,
-            state=self.get_domain_state(name),
+            state=state,
             disk_gib=self.disk_capacity_gib(name, spec.disk_target, volume),
         )
+        if state == STATE_RUNNING:
+            # A running domain is two documents: what it runs and what its next
+            # boot gets. Both are needed to tell "already set" apart from
+            # "already in the config, waiting for a reboot".
+            cfg = parse_vm_spec(_stdout(["virsh", "dumpxml", "--inactive", name]))
+            if cfg is not None:
+                # `ram_max_kib` of the *config* document is `<memory>` for every
+                # virt-runner guest, i.e. the size that gets reserved on the next
+                # boot — the number that tells us whether the config really says
+                # what we think it does.
+                spec = replace(
+                    spec,
+                    config_vcpu=cfg.vcpu,
+                    config_ram_kib=cfg.ram_max_kib,
+                )
+        return spec
 
     def network_defined(self, network: str) -> bool:
         """True when libvirt knows a virtual network of that name."""
         return _spawn(["virsh", "net-dumpxml", network]).returncode == 0
+
+    def interface_target_exists(self, iface: Interface) -> bool:
+        """True when *iface*'s source is usable on this host right now.
+
+        Checked **before** a NIC is given up: libvirt only notices a missing
+        network/bridge at attach time, i.e. after the detach already happened.
+        """
+        if iface.type == "network":
+            return self.network_defined(iface.source)
+        return _spawn(["ip", "link", "show", "dev", iface.source]).returncode == 0
 
     @staticmethod
     def _flags(live: bool) -> list[str]:
@@ -1626,37 +1688,91 @@ class Virtualizer:
             _run(["virsh", "setvcpus", name, str(vcpu), "--maximum", "--config"])
             _run(["virsh", "setvcpus", name, str(vcpu), "--config"])
 
-    def set_ram_gib(self, name: str, ram_gib: int, *, live: bool, ceiling: int) -> bool:
+    def set_ram_gib(
+        self,
+        name: str,
+        ram_gib: int,
+        *,
+        live: bool,
+        ceiling: int,
+        config_ceiling: int = 0,
+    ) -> bool:
         """Persist the RAM size in GiB; balloon first when *live*.
+
+        Args:
+            ceiling: The live domain's ceiling — what the running guest can be
+                ballooned to without a reboot.
+            config_ceiling: ``<memory>`` of the persisted config, which is what the
+                config write is compared against. A guest that is behind its own
+                config has two different ceilings, and the wrong one silently
+                skips the ceiling write.
 
         Returns:
             ``True`` when the running domain was changed as well.
 
         Raises:
-            RuntimeError: the persisted change failed.
+            RuntimeError: the persisted change failed, or the guest is bigger than
+                the host — libvirt writes such a config without complaint and the
+                domain then fails to boot.
         """
         kib = str(ram_gib * 1024 * 1024)
+        cap = self.host_memory_kib()
+        if cap is not None and int(kib) > cap:
+            raise RuntimeError(
+                f"refusing to give '{name}' {ram_gib} GiB of RAM: the libvirt host "
+                f"has {cap // 1024 // 1024} GiB total, and libvirt would write the "
+                "config anyway — the domain would not start (no change was made)"
+            )
         live_ok = (
             live and _spawn(["virsh", "setmem", name, kib, "--live"]).returncode == 0
         )
-        self._write_ram_config(name, kib, ceiling)
+        self._write_ram_config(name, kib, config_ceiling or ceiling)
         return live_ok
 
+    def host_memory_kib(self) -> int | None:
+        """Total RAM of the libvirt host, or ``None`` when it cannot be read.
+
+        ``virsh setmem --config`` validates a size against nothing: a guest bigger
+        than the machine is accepted into ``<memory>``/``<currentMemory>`` and only
+        fails on the next start. The ceiling virt-runner needs a real number for.
+        """
+        stdout = _spawn(["virsh", "nodeinfo"]).stdout
+        for line in stdout.splitlines():
+            if line.lower().startswith("memory size"):
+                digits = "".join(c for c in line.split(":", 1)[-1] if c.isdigit())
+                return int(digits) if digits else None
+        return None
+
     def _write_ram_config(self, name: str, kib: str, ceiling: int) -> None:
-        """``virsh setmem --config``, raising the total memory first when growing.
+        """Write both halves of the domain's RAM: ``<memory>`` and ``<currentMemory>``.
 
         Growing past ``<memory>`` fails with "cannot set memory higher than max
-        memory", so the ceiling goes up through ``--maximum`` (which writes
+        memory", and the ceiling call is a *separate* command: ``virsh setmem``
+        has no ``--maximum`` (that spelling belongs to ``setvcpus``), so the
+        ceiling goes up through ``virsh setmaxmem --config`` — which writes
         ``<memory>`` when the domain has no ``<maxMemory>`` element, as every
-        virt-runner guest has) before the same value is set as the boot size.
+        virt-runner guest has. ``setmaxmem`` alone is not enough: it leaves
+        ``<currentMemory>`` at the old value and the guest boots with the old
+        amount of RAM, so the boot size has to follow in a second call.
+
+        The reverse half is the one that bites. A *lower* target makes
+        ``setmem --config`` succeed on the first try — it moves
+        ``<currentMemory>`` and leaves ``<memory>`` at the old, higher size, which
+        is what qemu allocates for the next boot. libvirt does not care, so does
+        the tool, and the guest simply does not start (see
+        ``docs/lessons-learned/013-virsh-option-spelling.md``). So when the target
+        is below the ceiling, lower the ceiling too.
         """
         try:
             _run(["virsh", "setmem", name, kib, "--config"])
         except RuntimeError:
             if int(kib) <= ceiling:
                 raise
-            _run(["virsh", "setmem", name, kib, "--maximum", "--config"])
+            _run(["virsh", "setmaxmem", name, kib, "--config"])
             _run(["virsh", "setmem", name, kib, "--config"])
+            return
+        if int(kib) < ceiling:
+            _run(["virsh", "setmaxmem", name, kib, "--config"])
 
     def grow_disk(self, name: str, target: str, volume: str | None, gib: int) -> None:
         """Grow the domain's first disk to *gib* (never shrinks — checked upstream).
@@ -1680,7 +1796,12 @@ class Virtualizer:
         self.grow_volume(volume, gib)
 
     def grow_volume(self, volume: str, disk_gib: int) -> None:
-        """Grow a pool volume, refusing to shrink it (``vol-resize --grow``).
+        """Grow a pool volume. Shrinking is libvirt's own refusal, not ours.
+
+        ``virsh vol-resize`` errors on a smaller capacity unless ``--shrink`` is
+        passed explicitly (there is no ``--grow`` option), and this call never
+        passes it — plus :func:`virt_runner.cmd_modify.plan_changes` refuses a
+        smaller ``--disk`` before it gets here.
 
         Raises:
             VirtError: ``volume-resize-failed``.
@@ -1695,7 +1816,6 @@ class Virtualizer:
                     self.POOL,
                     "--capacity",
                     f"{disk_gib}G",
-                    "--grow",
                 ]
             )
         except RuntimeError as exc:
@@ -1752,14 +1872,29 @@ class Virtualizer:
             )
 
     def reboot(self, name: str) -> None:
-        """Power-cycle the domain (start it when it was off).
+        """Power-cycle the domain, letting the guest sync first.
+
+        ``virsh shutdown`` is the cooperative half: the guest sees the ACPI event
+        and powers itself off. ``destroy`` is only the fallback for a guest that
+        ignored it — a hard power cut is what corrupts a filesystem that was just
+        resized, so it gets no first turn. A domain that is already off is simply
+        started.
 
         Raises:
             RuntimeError: from destroy/start — a half-rebooted VM must not
                 report success.
         """
-        if self.get_domain_state(name) == STATE_RUNNING:
-            _run(["virsh", "destroy", name])
+        if self.get_domain_state(name) != STATE_RUNNING:
+            _run(["virsh", "start", name])
+            return
+        _spawn(["virsh", "shutdown", name])
+        off = _poll(
+            lambda: self.get_domain_state(name) != STATE_RUNNING,
+            self.REBOOT_GRACE_S,
+            self.POLL_INTERVAL_S,
+        )
+        if not off:
+            _quiet(["virsh", "destroy", name])
         _run(["virsh", "start", name])
 
     def grow_guest_filesystem(

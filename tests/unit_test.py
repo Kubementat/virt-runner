@@ -1,6 +1,7 @@
 """Pure-logic checks (no libvirt, no network). Run: uv run tests/unit_test.py"""
 
 import json
+import subprocess
 
 import virt_runner.cmd_modify as cm
 import virt_runner.virtualizer as vz
@@ -66,7 +67,8 @@ class FakeVz:
 
     The live answers follow libvirt's own rules (a change above the ceiling is
     not live, a guest that is off does not balloon), so the plan/apply split is
-    exercised for real; `net_error`/`fs_code` inject the failures.
+    exercised for real; `net_error`/`fs_code` inject the failures, `missing`
+    marks a network/bridge the host does not have.
     """
 
     POOL = "vm-pool"
@@ -80,12 +82,14 @@ class FakeVz:
         net_error=None,
         fs_code=0,
         fs_out="virt-runner: guest filesystem grown",
+        missing=(),
     ):
         self.running = running
         self.spec = spec or vm_spec(state="running" if running else "shut off")
         self.net_error = net_error
         self.fs_code = fs_code
         self.fs_out = fs_out
+        self.missing = missing
         self.vcpu_calls = []
         self.ram_calls = []
         self.disks = []
@@ -123,6 +127,9 @@ class FakeVz:
     def network_defined(self, network):
         return network in ("default", "mgmt")
 
+    def interface_target_exists(self, iface):
+        return iface.source not in self.missing
+
     def vm_ip(self, name, lease_file):
         return "192.168.122.11" if self.running else None
 
@@ -132,7 +139,7 @@ class FakeVz:
         self.vcpu_calls.append((vcpu, live, ceiling))
         return live and self.running and vcpu <= ceiling
 
-    def set_ram_gib(self, name, ram_gib, *, live, ceiling):
+    def set_ram_gib(self, name, ram_gib, *, live, ceiling, config_ceiling=0):
         self.ram_calls.append((ram_gib, live))
         return live and self.running and ram_gib * 1024 * 1024 <= ceiling
 
@@ -290,7 +297,6 @@ def main() -> None:
     assert _newest_match(["foo.txt"], "*.qcow2") is None
 
     # _resolve_glob — newest wins online; offline falls back to cache or raises.
-    import subprocess
     import tempfile
     from pathlib import Path
 
@@ -759,10 +765,63 @@ def main() -> None:
     assert headroom.ram_kib == 2 * 1024 * 1024
     assert headroom.ram_max_kib == 4 * 1024 * 1024
     assert headroom.ram_gib == 2
+    # What the guest *runs* is <currentMemory>, not <memory> — the latter is what
+    # the next boot gets. They diverge after any config-only RAM change, and
+    # reading the wrong one makes `--ram` answer "already set" to a guest that
+    # disagrees, and reports the config size in `vm.ram_gib`.
+    diverged = vz.parse_vm_spec(
+        VM_XML.replace(
+            "  <memory unit='KiB'>2097152</memory>",
+            "  <memory unit='KiB'>4194304</memory>",
+        )
+    )
+    assert diverged.ram_kib == 2 * 1024 * 1024 and diverged.ram_gib == 2
+    assert diverged.ram_max_kib == 4 * 1024 * 1024
     # Foreign or broken input is not a VM, it is None.
     assert vz.parse_vm_spec("") is None
     assert vz.parse_vm_spec("<domain><name>x</name></domain>") is None
     assert vz.parse_vm_spec("not xml at all") is None
+
+    # Lease lookups: dnsmasq keeps an old lease next to the renewed one, and the
+    # guest answers on the newer address. First match would hand SSH an address it
+    # no longer has — which reads as a timeout, never as a wrong IP.
+    leases = json.dumps(
+        [
+            {
+                "ip-address": "192.168.122.11",
+                "mac-address": "52:54:00:00:00:0a",
+                "expiry-time": 1793014456,
+            },
+            {
+                "ip-address": "192.168.122.111",
+                "mac-address": "52:54:00:00:00:0a",
+                "client-id": "ff:56:50:4d:98:00",
+                "expiry-time": 1793014459,
+            },
+            {
+                "ip-address": "192.168.122.99",
+                "mac-address": "52:54:00:00:00:0b",
+                "expiry-time": 1793015000,
+            },
+        ]
+    )
+    assert (
+        vz.Virtualizer._parse_json_lease(leases, "52:54:00:00:00:0a")
+        == "192.168.122.111"
+    )
+    assert (
+        vz.Virtualizer._parse_json_lease(leases, "52:54:00:00:00:0b")
+        == "192.168.122.99"
+    )
+    assert vz.Virtualizer._parse_json_lease(leases, "52:54:00:00:00:ff") is None
+    # A lease file with no expiry field is still a lease file.
+    assert (
+        vz.Virtualizer._parse_json_lease(
+            '[{"ip-address": "10.0.0.1", "mac-address": "aa:bb:cc:dd:ee:ff"}]',
+            "aa:bb:cc:dd:ee:ff",
+        )
+        == "10.0.0.1"
+    )
 
     # parse_net / parse_net_add / parse_mac — the accepted spellings, and the
     # junk that must be a usage error before libvirt is ever called.
@@ -864,6 +923,38 @@ def main() -> None:
         raise AssertionError("expected modify-noop")
     except VirtError as e:
         assert e.code == "modify-noop", e.code
+    # A guest that is behind its own persisted config is not "already set": the
+    # config already says what was asked, so there is nothing to write, but the
+    # next boot would change and the answer has to say so (`on-boot`, no ops).
+    behind = vm_spec(
+        vcpu=1,
+        config_vcpu=2,
+        ram_kib=1024 * 1024,
+        config_ram_kib=2 * 1024 * 1024,
+    )
+    ch, _ = cm.plan_changes(
+        behind, cm.Request(vcpu=2, ram_gib=2), live=True, auto_grow_fs=True
+    )
+    assert [(c.field, c.effective, c.ops) for c in ch] == [
+        ("vcpu", "on-boot", ()),
+        ("ram_gib", "on-boot", ()),
+    ], [(c.field, c.effective, c.ops) for c in ch]
+    # But a request that matches the *live* size and not the config is a change:
+    # writing 1 vCPU back into a config that says 2 is the whole point, and the
+    # document says so with the config as its `from`.
+    (vcpu_write,) = cm.plan_changes(
+        behind, cm.Request(vcpu=1), live=True, auto_grow_fs=True
+    )[0]
+    assert (vcpu_write.field, vcpu_write.from_, vcpu_write.to) == ("vcpu", 2, 1)
+    assert vcpu_write.ops == (("vcpu", 1),)
+    # Same for RAM: a guest that runs 1 GiB while its config reserves 4 GiB is
+    # not "already at 1 GiB", it is one boot away from being wrong.
+    broken = vm_spec(vcpu=1, ram_kib=1024 * 1024, config_ram_kib=4 * 1024 * 1024)
+    (ram_fix,) = cm.plan_changes(
+        broken, cm.Request(ram_gib=1), live=False, auto_grow_fs=True
+    )[0]
+    assert (ram_fix.from_, ram_fix.to, ram_fix.effective) == (4, 1, "on-boot")
+    assert ram_fix.ops == (("ram", 1),)
     # A size we cannot read is never resized blindly.
     try:
         cm.plan_changes(
@@ -1052,6 +1143,156 @@ def main() -> None:
         assert e.code == "net-change-failed", e.code
         assert "target device name was not found" in str(e), str(e)
 
+    # A target the host does not have is refused **before** the old NIC is given
+    # up: detaching and then failing to attach leaves a running guest unreachable
+    # while the command reports success.
+    stranded = FakeVz(missing=("nope",))
+    ctx_strand = cm.ApplyContext(
+        v=stranded,
+        spec=vm_spec(),
+        volume=None,
+        live=True,
+        user="ci",
+        identity="/id",
+        ip="192.168.122.11",
+    )
+    changes, _ = cm.plan_changes(
+        vm_spec(),
+        cm.Request(net=vz.Interface("bridge", "nope", "52:54:00:aa:bb:cc")),
+        live=True,
+        auto_grow_fs=True,
+    )
+    try:
+        cm.apply_changes(ctx_strand, changes)
+        raise AssertionError("expected net-change-failed")
+    except VirtError as e:
+        assert e.code == "net-change-failed", e.code
+        assert "nothing was changed" in str(e), str(e)
+    assert stranded.ifaces == [], f"nothing may be detached: {stranded.ifaces}"
+
+    # A run that stops half-way must not report its untouched entries as
+    # changes: `applied` separates "did this" from "was asked to do this".
+    class BoomVz(FakeVz):
+        def set_ram_gib(self, name, ram_gib, *, live, ceiling, config_ceiling=0):
+            raise RuntimeError("libvirt said no")
+
+    half = BoomVz()
+    ctx_half = cm.ApplyContext(
+        v=half,
+        spec=vm_spec(),
+        volume="t1_vda.qcow2",
+        live=False,
+        user="ci",
+        identity="/id",
+        ip="192.168.122.11",
+    )
+    changes, _ = cm.plan_changes(
+        vm_spec(),
+        cm.Request(vcpu=4, ram_gib=8, disk_gib=16),
+        live=False,
+        auto_grow_fs=False,
+    )
+    try:
+        cm.apply_changes(ctx_half, changes)
+        raise AssertionError("expected the apply to stop at ram")
+    except RuntimeError:
+        pass
+    assert half.vcpu_calls == [(4, False, 4)], half.vcpu_calls
+    assert [c.applied for c in changes] == [True, False, False], [
+        (c.field, c.applied) for c in changes
+    ]
+    docs = [c.document() for c in changes]
+    assert "applied" not in docs[0], docs[0]
+    assert docs[1]["applied"] is False and docs[2]["applied"] is False
+
+    # libvirt's option spelling is a promise: virsh 10.0 has no `setmem
+    # --maximum` (the ceiling command is `setmaxmem`) and no `vol-resize --grow`
+    # (shrinking is refused unless `--shrink` is asked for). One wrong word makes
+    # the whole feature fail on every host, so it is pinned here, not on a host.
+    argv: list[list[str]] = []
+    real_run, real_spawn = vz._run, vz._spawn
+    try:
+        vz._spawn = lambda cmd, **kw: (
+            argv.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", "")
+        )
+
+        def record(cmd, **kw):
+            argv.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        vz._run = record
+        v = Virtualizer()
+        v.grow_volume("t1_vda.qcow2", 16)
+        grown = argv[-1]
+        assert grown[:2] == ["virsh", "vol-resize"], grown
+        assert "--grow" not in grown and "--shrink" not in grown, grown
+        assert "--capacity" in grown and "16G" in grown and "--pool" in grown, grown
+
+        ceiling = {"first": True}
+
+        def stubborn(cmd, **kw):
+            argv.append(cmd)
+            if cmd[:2] == ["virsh", "setmem"] and ceiling["first"]:
+                ceiling["first"] = False
+                raise RuntimeError("cannot set memory higher than max memory")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        vz._run = stubborn
+        v._write_ram_config("t1", str(4 * 1024 * 1024), 2 * 1024 * 1024)
+        assert ["virsh", "setmaxmem", "t1", "4194304", "--config"] in argv, argv
+        assert ["virsh", "setmem", "t1", "4194304", "--config"] in argv[-2:], argv
+        assert not any("--maximum" in a for a in argv), argv
+
+        # Lowering is the other shape, and the one libvirt gets wrong: `setmem
+        # --config` accepts a smaller size on the first try, moves only
+        # `<currentMemory>`, and `<memory>` stays high enough to fail the next
+        # boot. So the ceiling has to follow the target down.
+        vz._run = record
+        mark = len(argv)
+        v._write_ram_config("t1", str(1024 * 1024), 4 * 1024 * 1024)
+        assert argv[mark:] == [
+            ["virsh", "setmem", "t1", "1048576", "--config"],
+            ["virsh", "setmaxmem", "t1", "1048576", "--config"],
+        ], argv[mark:]
+
+        # vCPU has the same two-step shape, and here `--maximum` really exists.
+        vcpu_step = {"first": True}
+
+        def vcpu_stubborn(cmd, **kw):
+            argv.append(cmd)
+            if cmd[:2] == ["virsh", "setvcpus"] and vcpu_step["first"]:
+                vcpu_step["first"] = False
+                raise RuntimeError("cannot set vcpu count higher than max vcpu")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        vz._run = vcpu_stubborn
+        v.set_vcpu("t1", 8, live=False, ceiling=4)
+        assert ["virsh", "setvcpus", "t1", "8", "--maximum", "--config"] in argv, argv
+        assert argv[-1] == ["virsh", "setvcpus", "t1", "8", "--config"], argv
+
+        # Host RAM is the real ceiling, and libvirt is not the one enforcing it:
+        # `setmem --config` writes a 4 TiB guest to a 125 GiB box without a word,
+        # and the domain only fails on its next start. Refuse it, and change
+        # nothing when we do.
+        mark = len(argv)
+        node = subprocess.CompletedProcess(
+            ["virsh", "nodeinfo"],
+            0,
+            "CPU model: x86_64\nCPU(s): 32\nMemory size: 131148072 KiB\n",
+            "",
+        )
+        vz._spawn = lambda cmd, **kw: argv.append(cmd) or node
+        assert v.host_memory_kib() == 131148072
+        try:
+            v.set_ram_gib("t1", 4096, live=False, ceiling=2 * 1024 * 1024)
+        except RuntimeError as exc:
+            assert "125 GiB" in str(exc), exc
+        else:
+            raise AssertionError("a 4 TiB guest on a 125 GiB host must be refused")
+        assert not [a for a in argv[mark:] if a[:2] == ["virsh", "setmem"]], argv
+    finally:
+        vz._run, vz._spawn = real_run, real_spawn
+
     # The command itself, against the fake: one JSON document, the documented
     # codes, and nothing executed under --plan.
     fake = FakeVz()
@@ -1059,6 +1300,8 @@ def main() -> None:
     assert code == 0 and body["status"] == "success", body
     assert body["tool"] == "vm-modify" and body["error"] is None
     assert body["planned"] is True and body["changes"][0]["field"] == "vcpu"
+    # A plan never ran anything, so it must not claim either way.
+    assert all("applied" not in c for c in body["changes"]), body["changes"]
     assert fake.vcpu_calls == [] and body["rebooted"] is False
     assert body["vm"]["name"] == "t1" and body["vm"]["state"] == "running"
     assert body["vm"]["ram_gib"] == 2 and body["vm"]["disk_gib"] == 8
@@ -1079,9 +1322,10 @@ def main() -> None:
     }
 
     # Identity of the target comes first: nothing else is worth trying after.
+    # Same code destroy/ssh use for "no such domain" — one condition, one code.
     assert modify_cli(FakeVz(), ["ghost", "--vcpu", "3", "--json"])[1]["error"][
         "code"
-    ] == ("vm-not-found")
+    ] == ("vm-not-defined")
     code, body = modify_cli(FakeVz(), ["foreign", "--ram", "4", "--json"])
     assert code == 1 and body["error"]["code"] == "not-a-virt-runner-vm", body
     assert modify_cli(FakeVz(), ["t1", "--disk", "4", "--json"])[1]["error"][
@@ -1095,6 +1339,13 @@ def main() -> None:
     )
     code, body = modify_cli(FakeVz(), ["t1", "--vcpu", "2", "--json"])
     assert code == 2 and body["error"]["code"] == "modify-noop", body
+    # `--reboot` alone is not a noop: the change may already be sitting in the
+    # config, and rebooting is how it becomes real.
+    off = FakeVz()
+    code, body = modify_cli(off, ["t1", "--reboot", "--json"])
+    assert code == 0 and body["status"] == "success", body
+    assert body["changes"] == [] and body["rebooted"] is True
+    assert off.reboots == 1
     assert (
         modify_cli(FakeVz(), ["t1", "--mac", "nope", "--json"])[1]["error"]["code"]
         == "usage"
