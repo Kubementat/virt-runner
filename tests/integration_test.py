@@ -421,6 +421,9 @@ def main() -> None:
         for bad, code, rc_want in (
             (["--disk", "4"], "disk-shrink-unsupported", 1),
             (["--vcpu", "1"], "modify-noop", 2),
+            # libvirt would write this into the config without a word, and only
+            # the next boot would find out — so `modify` refuses it up front.
+            (["--ram", "100000"], "runtime-error", 1),
             (["--mac", "99"], "usage", 2),
             (["--net-remove", "52:54:00:de:ad:be"], "usage", 2),
             # The VM's own single NIC: removing it would strand the guest.
@@ -436,8 +439,48 @@ def main() -> None:
             "modify", "it-never-existed", "--vcpu", "2", allow_fail=True
         )
         check(
-            rc == 1 and doc["error"]["code"] == "vm-not-found",
-            f"modify of an undefined VM is vm-not-found, got {doc['error']} / {rc}",
+            rc == 1 and doc["error"]["code"] == "vm-not-defined",
+            f"modify of an undefined VM is vm-not-defined, got {doc['error']} / {rc}",
+        )
+
+        # `--reboot` on its own is a request, not a noop: the config is already
+        # right and rebooting is what makes it real.
+        doc, rc = virt_runner("modify", name, "--reboot", "--wait")
+        check(
+            rc == 0 and doc["rebooted"] is True and doc["changes"] == [],
+            f"modify --reboot alone power-cycles without a change, got {doc}",
+        )
+
+        # Config-vs-live drift, which is what a config-only change that nobody
+        # ever rebooted into looks like: the *config* is what `modify` compares
+        # against, so a second identical request is still a pending change with
+        # the running number as `from`, never a noop — and the guest proves it is
+        # still small.
+        doc, _ = virt_runner("modify", name, "--ram", "2")
+        check(
+            doc["status"] == "success"
+            and doc["changes"][0]["field"] == "ram_gib"
+            and doc["changes"][0]["effective"] == "on-boot",
+            f"a config-only RAM change reports on-boot, got {doc['changes']}",
+        )
+        doc, _ = virt_runner("list")
+        running = next(v for v in doc["vms"] if v["name"] == name)
+        mem_mib = int(
+            ssh_run(
+                running["ssh_command"],
+                "awk '/MemTotal/{print int($2/1024)}' /proc/meminfo",
+            ).strip()
+        )
+        check(
+            mem_mib < 1500,
+            f"{name} still runs on 1 GiB after a config-only grow, got {mem_mib} MiB",
+        )
+        doc, rc = virt_runner("modify", name, "--ram", "2", allow_fail=True)
+        check(
+            rc == 0
+            and [(c["from"], c["to"], c["effective"]) for c in doc["changes"]]
+            == [(1, 2, "on-boot")],
+            f"re-asking for what the config already has is a pending change, not a noop, got {doc['changes']}",
         )
 
         # One call: 1->2 vcpu, 1->2 GiB RAM, 8->16 GiB disk, live where libvirt
@@ -484,13 +527,16 @@ def main() -> None:
         )
         doc, _ = virt_runner("list")
         vm = next(vm for vm in doc["vms"] if vm["name"] == name)
+        # `df -B1 /` and take the size column of the single data row: `--output`=
+        # is a coreutils-version trap and prints a `1G-blocks` header line that
+        # would poison the field unpacking below.
         out = ssh_run(
             vm["ssh_command"],
             "nproc; awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo; "
-            "lsblk -bdno SIZE /dev/vda; df -BG --output=size= / | tr -d ' G'; "
+            "lsblk -bdno SIZE /dev/vda; df -B1 / | awk 'NR==2 {print $2}'; "
             "mountpoint -q /mnt/share && echo remounted",
         )
-        vcpu_n, mem_mib, disk_bytes, root_gib, share_line = out.split()
+        vcpu_n, mem_mib, disk_bytes, root_bytes, share_line = out.split()
         check(vcpu_n == "2", f"{name} runs with 2 vcpus inside the guest, got {vcpu_n}")
         check(
             1700 <= int(mem_mib) <= 2048,
@@ -501,8 +547,8 @@ def main() -> None:
             f"{name}'s /dev/vda is 16 GiB, got {disk_bytes} bytes",
         )
         check(
-            int(root_gib) >= 14,
-            f"{name}'s root filesystem grew into the disk, got {root_gib} GiB",
+            int(root_bytes) >= 14 * 1024**3,
+            f"{name}'s root filesystem grew into the disk, got {root_bytes} bytes",
         )
         check("remounted" in share_line, f"{name} still mounts the virtiofs share")
 
@@ -551,16 +597,16 @@ def main() -> None:
         )
         out = ssh_run(
             vm["ssh_command"],
-            "lsblk -bdno SIZE /dev/vda; df -BG --output=size= / | tr -d ' G'",
+            "lsblk -bdno SIZE /dev/vda; df -B1 / | awk 'NR==2 {print $2}'",
         )
-        disk_bytes, root_gib = out.split()
+        disk_bytes, root_bytes = out.split()
         check(
             int(disk_bytes) == 20 * 1024**3,
             f"{name}'s /dev/vda grew to 20 GiB without the guest fs, got {disk_bytes}",
         )
         check(
-            int(root_gib) < 20,
-            f"{name}'s root fs stayed as it was, got {root_gib} GiB",
+            int(root_bytes) < 20 * 1024**3,
+            f"{name}'s root fs stayed as it was, got {root_bytes} bytes",
         )
 
         # 3e. The same change set on a powered-off guest: every change lands in
