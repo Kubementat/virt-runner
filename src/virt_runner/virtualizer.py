@@ -1564,9 +1564,11 @@ class Virtualizer:
     def owns_domain(self, name: str) -> bool:
         """True when *name* is a domain virt-runner created (or owns the disk of).
 
-        Same membership test as ``vm-list`` (a disk under the pool path), plus
-        the per-VM metadata written at create — a domain defined by hand that
-        happens to borrow a pool volume is still not ours to resize.
+        The membership test is identical to ``vm-list``'s: a disk under the pool
+        path, or the per-VM metadata. The first half is what does the work — a
+        hand-defined domain that points at a pool volume is *not* recognized as
+        foreign, because it is a guest whose storage this tool owns. Use
+        ``virsh`` for anything outside the pool.
         """
         if self.domain_meta(name):
             return True
