@@ -14,14 +14,16 @@ qemuDomainBlockResize():  if (virDomainObjCheckActive(vm) < 0) goto endjob;
 ```
 
 So `virsh blockresize NAME vda 16G` on a shut-off domain fails ("domain is not running").
-For a powered-off guest grow the storage instead, with the grow-only flag so a bug in our
-own planner can never truncate a disk:
+For a powered-off guest grow the storage instead:
 
 ```
-virsh vol-resize NAME_vda.qcow2 --pool vm-pool --capacity 16G --grow
+virsh vol-resize NAME_vda.qcow2 --pool vm-pool --capacity 16G
 ```
 
-`--grow` is the important half: without it `vol-resize` happily shrinks.
+There is no `--grow` option (see lesson 013) — that flag does not exist in libvirt 10.0 and the
+command errors out with "doesn't support option". The never-shrink guarantee is libvirt's own:
+`vol-resize` refuses a smaller capacity unless `--shrink` is explicitly passed, and virt-runner
+never passes it. The planner refuses shrinks upstream as well, so there are two guards, not three.
 
 ## 2. A live domain's *ceiling* is fixed — but `--config` alone may still raise it
 
@@ -41,14 +43,18 @@ in this order:
 ```
 virsh setvcpus NAME 8 --maximum --config   # raises <vcpu> (the ceiling)
 virsh setvcpus NAME 8 --config             # sets the boot count (<vcpu current=…>)
-virsh setmem NAME 8388608 --maximum --config   # writes <memory> when there is no <maxMemory>
-virsh setmem NAME 8388608 --config
+virsh setmaxmem NAME 8388608 --config      # raises <memory> when there is no <maxMemory>
+virsh setmem   NAME 8388608 --config       # sets what the next boot gets
 ```
 
-`setmem --maximum` maps to `virDomainDefSetMemoryTotal()` — for the flat `<memory>` layout
-virt-runner creates (no `<maxMemory>`, no virtio-mem) it *is* the boot memory. A plain
-`setmem`/`setvcpus --config` above the ceiling fails with "cannot set memory higher than max
-memory", so the pattern is: try the single call, on failure and only when growing, raise the
+The memory pair is not symmetric with the vCPU pair, and that cost a review round: **`virsh
+setmem` has no `--maximum`** (that option belongs to `setvcpus` alone). The ceiling command is the
+separate `setmaxmem`, and `setmaxmem` on its own is only half a change — it leaves
+`<currentMemory>` at the old value, so the guest boots with the old amount of RAM and
+`dumpxml --inactive` looks perfectly fine. Both calls are needed.
+
+A plain `setmem`/`setvcpus --config` above the ceiling fails with "cannot set memory higher than
+max memory", so the pattern is: try the single call, on failure and only when growing, raise the
 ceiling and retry. A shrink needs no ceiling change, and stays live-able (balloon down).
 
 Because the ceiling change only lands at the next boot, `--live` cannot promise anything here:
@@ -75,14 +81,56 @@ Set `state` and let the property do its job.
 one and silently never matches for the other. Check the real output before parsing a table —
 the failure mode is "pool not found", not a parse error.
 
+## 6. Lowering RAM is a two-call change too, and it fails silently
+
+Growing was covered above. **Shrinking** is worse, because nothing fails: `virsh setmem NAME KIB
+--config` accepts a smaller size on the first try, moves `<currentMemory>`, and leaves `<memory>`
+at the old, bigger number. Both documents then look internally consistent — and `<memory>` is
+what qemu reserves. The proof, on a domain whose config had been grown past the host:
+
+```
+$ virsh -c qemu:///system dumpxml --inactive fx-b | grep -E '<memory|<currentMemory'
+<memory unit='KiB'>4294967296</memory>            # 4 TiB on a 125 GiB host
+<currentMemory unit='KiB'>2097152</currentMemory>  # "2 GiB", looks fine
+$ virsh -c qemu:///system start fx-b
+error: internal error: QEMU unexpectedly closed the monitor (vm='fx-b'):
+  qemu-system-x86_64: cannot set up guest memory 'pc.ram': Cannot allocate memory
+```
+
+So a config write that returns 0 is not a change that works, and an error-free `modify --ram` is
+not a bootable guest. `setmaxmem` has to follow the target **down** as well (`--config` accepts
+that too), and a `--ram` above the host's installed RAM has to be refused before the write —
+libvirt has no opinion about it at all.
+
+## 7. Compare a request to the config, not to the running guest
+
+`modify --ram 2` on the domain above answered `modify-noop`: the running guest really does have
+2 GiB, so the tool concluded "already set" — while the next boot had 4 TiB queued up. A running
+domain is two documents, they drift (a config-only change nobody rebooted into, a `virsh setmem
+--live` by someone holding the client, a bug like this one), and comparing only the live side
+turns a broken config into a green exit code.
+
+The rule that replaced it: config matches **and** guest matches → `noop`; config matches only →
+report an `on-boot` change with no libvirt call (the guest is behind, rebooting is the fix);
+config disagrees → write it, with the config's number as `from` so the document is not "2 → 2".
+
 ## Lessons
+
+- A config write that succeeds is not a correct config: `<memory>` is what qemu reserves, so
+  check both halves (`dumpxml --inactive`) before you claim a resize worked.
+- Ask "what does libvirt *refuse* here?" for every write. Where it refuses, you get an error and
+  a retry path; where it silently accepts (sizes above host RAM, ceilings left high on a
+  shrink), the failure moves to the next boot and looks unrelated.
 
 - Read the driver function before designing a live/config fallback chain; the error strings
   tell you exactly which flag combinations are legal.
 - Try the cheap call, catch, escalate to the two-call form only for the growth case — keeps
   the common path one subprocess and still handles the ceiling.
-- Destructive primitives get their guard flag (`--grow`) even when the planner already
-  refuses; defence in depth on disk sizes.
+- Destructive primitives need a guard, but check that the guard you are reaching for actually
+  exists before writing it down (see lesson 013). Here libvirt's own refusal to shrink without
+  `--shrink` is the guard.
 - A filesystem grow is a guest-side operation, not a libvirt one: it can only run on a booted
   guest, so re-issuing the same `--disk N` has to stay a valid "grow my filesystem now"
   request instead of becoming a no-op.
+- Diff a request against the *persisted* definition, not the running one. Reading only the live
+  side reads as "already set" to a domain that is one boot away from failing.

@@ -14,22 +14,36 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
   re-attach the primary NIC, `--net-add`/`--net-remove` for extra NICs and `--mac` to move the
   primary one, plus `--live`, `--reboot`, `--wait`, `--no-auto-grow-fs` and `--plan`. Ownership is
   gated the same way as `list` (a pool-resident disk or virt-runner metadata), so a hand-defined
-  domain is reported as `not-a-virt-runner-vm` and left untouched.
+  domain is reported as `not-a-virt-runner-vm` and left untouched. An undefined name answers
+  `vm-not-defined`, the same code `destroy`/`ssh` already use.
   Every change reports `effective: "now" | "on-boot"` because running state and persisted config
-  are two different things in libvirt: `virsh setvcpus`/`setmem` write the config for the next
-  boot, and a live change above the domain's ceiling is refused outright — `--live` is therefore
-  best effort and degrades to the persisted value with a warning rather than leaving the guest and
-  its config silently apart. `--reboot` closes that gap (and with `--wait` returns the fresh
-  address).
-  A disk grow uses `virsh blockresize` on a running guest and `virsh vol-resize --grow` for a
-  powered-off one (libvirt only resizes active domains), then grows the guest's own filesystem over
-  SSH with `growpart` + `resize2fs`/`xfs_growfs`/`btrfs`; that step is best effort — an unsupported
-  layout (LVM, no `growpart`) keeps the grown block device and reports the commands to run by hand.
-  Shrinking is refused (`disk-shrink-unsupported`), a request that matches the current config is
-  `modify-noop` (exit 2), and removing the last NIC is a usage error.
-- Unit tests for the `dumpxml` → `VmSpec` parser, the size/ceiling rules and the change planner
-  (including every refusal path), and an integration leg that plans, refuses, grows a running
-  guest's vCPU/RAM/disk, verifies it from inside the guest, and round-trips a second NIC.
+  are two different things in libvirt: `virsh setvcpus`/`setmem --config` write the config for the
+  next boot, and a live change above the domain's ceiling is refused outright — `--live` is
+  therefore best effort and degrades to the persisted value with a warning rather than leaving the
+  guest and its config silently apart. `--reboot` closes that gap (with `--wait` it also returns
+  the fresh address); it is a valid request on its own, because rebooting is how a config that is
+  already correct becomes real.
+  A disk grow uses `virsh blockresize` on a running guest and a plain `virsh vol-resize` for a
+  powered-off one (libvirt only resizes active domains, and refuses to shrink unless `--shrink` is
+  asked for), then grows the guest's own filesystem over SSH with `growpart` +
+  `resize2fs`/`xfs_growfs`/`btrfs`; that step is best effort — an unsupported layout (LVM, no
+  `growpart`) keeps the grown block device and reports the commands to run by hand. Re-issuing the
+  same `--disk` is the filesystem-only retry. Growing RAM past `<memory>` raises the ceiling with
+  `virsh setmaxmem --config` and then sets the boot size with `setmem --config`.
+  A NIC move refuses a network/bridge the host does not have **before** detaching anything, so a
+  running guest can never be left without an interface by a typo; if a run stops mid-way the
+  document marks the untouched entries `"applied": false` instead of reporting the whole plan.
+  A sizing request is compared to the **persisted config**, not to the running value: both sides
+  matching is the only `modify-noop`, a config that already matches reports `on-boot` without a
+  libvirt call, and a config that disagrees is corrected (with its own value as `from`) even when
+  the guest already looks right. `--ram` beyond the host's installed RAM is refused
+  (`runtime-error`) because libvirt writes it happily and only the next boot fails.
+  Shrinking is refused (`disk-shrink-unsupported`), removing the last NIC is a usage error, and
+  asking for what the guest **and** its config already have is `modify-noop` (exit 2).
+- Unit tests for the `dumpxml` → `VmSpec` parser (including `<currentMemory>` as the live size),
+  the size/ceiling rules and the change planner (including every refusal path), an argv guard that
+  pins every `virsh` option the tool passes, and an integration leg that plans, refuses, grows a
+  running guest's vCPU/RAM/disk, verifies it from inside the guest, and round-trips a second NIC.
 
 ## [0.5.0] - 2026-10-20
 

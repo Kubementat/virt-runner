@@ -104,11 +104,11 @@ virt-runner create NAME          # build + boot; --distro (ubuntu|arch|fedora),
                                  # --no-boot, --keep-going
 virt-runner destroy NAME         # undefine + delete disk (idempotent)
 virt-runner list                 # only VMs whose disk lives in vm-pool
-virt-runner modify NAME          # change an existing VM: --vcpu COUNT, --ram GiB,
-                                 # --disk GiB (grow only), --net NETWORK|bridge=NAME,
-                                 # --net-add 'network=NAME[,mac=..]', --net-remove MAC,
-                                 # --mac MAC, --no-auto-grow-fs, --live, --reboot,
-                                 # --wait, --plan (dry run)
+virt-runner modify NAME          # change an existing VM in place (see "Changing an existing VM")
+                                 # sizing:   --vcpu N  --ram GiB  --disk GiB (grow only)
+                                 # network:  --net SPEC  --net-add SPEC[,mac=..]  (repeatable)
+                                 #           --net-remove MAC  (repeatable)  --mac MAC
+                                 # control:  --live  --reboot  --wait  --no-auto-grow-fs  --plan
 virt-runner ssh NAME             # interactive shell (resolves IP, uses the injected key;
                                  # picks up the user recorded at create, --user to override)
 virt-runner setup [--check]      # host prerequisites — the bundled installer
@@ -165,13 +165,13 @@ failure, `2` usage error.
 | `network-not-active` | The `default` network is not active |
 | `unsupported-arch` | Host arch is not x86_64 or aarch64 |
 | `vm-already-defined` | A domain with the given name already exists |
-| `vm-not-defined` | No such domain (destroy/ssh of a missing VM) |
-| `vm-not-found` | No such domain (`modify` of a missing VM) |
+| `vm-not-defined` | No such domain (destroy/ssh/modify of a missing VM) |
 | `not-a-virt-runner-vm` | The domain exists but virt-runner did not create it (`modify`) |
-| `modify-noop` | `modify` where every given option already matches the VM (exit 2) |
+| `modify-noop` | `modify` where every given option already matches the guest **and** its config (exit 2) |
 | `disk-shrink-unsupported` | `modify --disk` smaller than the current disk |
-| `net-change-failed` | `virsh attach-interface`/`detach-interface` failed |
-| `vm-reboot-failed` | `modify --reboot` could not power-cycle the domain |
+| `net-change-failed` | `modify` NIC attach/detach failed — check `virsh domiflist NAME` before retrying |
+| `vm-reboot-failed` | `modify --reboot` could not bring the domain back up (changes stay persisted) |
+| `runtime-error` from `modify --ram` | the guest is bigger than the host's RAM — libvirt would write it, the guest would not start, nothing was changed |
 | `vm-not-running` | The domain exists but is not running |
 | `no-ip` | No DHCP lease/address found for the VM |
 | `ssh-key-missing` | No usable key at `--ssh-key` and none could be generated |
@@ -182,7 +182,7 @@ failure, `2` usage error.
 | `cloud-init-failed` | The cloud-init user/meta-data files could not be generated |
 | `volume-create-failed` | `virsh vol-create-as` failed |
 | `volume-import-failed` | `virsh vol-upload` failed |
-| `volume-resize-failed` | `virsh vol-resize` failed |
+| `volume-resize-failed` | `virsh vol-resize` failed (create, or growing the volume of a powered-off guest) |
 | `vm-create-failed` | `virt-install` failed (domain and volume removed) |
 | `vm-destroy-failed` | `virsh destroy`/`undefine` failed during teardown |
 | `volume-delete-failed` | `virsh vol-delete` failed during teardown |
@@ -191,31 +191,129 @@ failure, `2` usage error.
 | `virtiofsd-missing` | `--mount` given but `/usr/libexec/virtiofsd` is not installed |
 | `script-failed` | A `--script` exited non-zero (the VM is kept running) |
 
-## Resizing a running VM
+## Changing an existing VM (`modify`)
 
-`modify` reports what it changed and — this is the part that matters — **when the guest sees
-it**: every change carries `effective: "now"` or `"on-boot"`.
+`virt-runner modify NAME` changes a VM virt-runner created instead of destroying and recreating
+it: vCPU count, RAM, disk size (grow), and the network interfaces. It takes at least one change
+option; they are all composable in a single call.
 
 ```bash
-virt-runner modify myvm --vcpu 4 --ram 8 --disk 40 --reboot --wait   # apply, reboot, wait for SSH
-virt-runner modify myvm --net-add mgmt --json | jq .changes          # plan-free, live NIC add
+virt-runner modify myvm --vcpu 4 --ram 8 --disk 40 --reboot --wait   # resize, reboot, wait for SSH
+virt-runner modify myvm --plan --vcpu 4 --json | jq .changes         # what would change, nothing touched
+virt-runner modify myvm --net-add mgmt                               # live NIC on network `mgmt`
+virt-runner modify myvm --net-remove 52:54:00:12:34:56               # and later, by MAC
 ```
 
-- **vCPU / RAM** are persisted with `virsh setvcpus`/`setmem --config`. libvirt refuses a *live*
-  change above the domain's ceiling, so `--live` is best effort: if the hot-plug is refused the
-  change still lands in the config, is reported as `on-boot` and comes with a warning. A change
-  the running guest did not take is never silently diverging — `--reboot` (optionally `--wait`)
-  closes the gap.
-- **Disk** grows with `virsh blockresize` (a powered-off guest grows its pool volume instead) and
-  then grows the guest's own filesystem over SSH (`growpart` + `resize2fs`/`xfs_growfs`/`btrfs`).
-  That last step is best effort: if the guest lacks `growpart` or the layout is LVM, the block
-  device is still grown and the warning lists the commands to run inside the guest.
-  `--no-auto-grow-fs` skips the SSH step entirely.
-- **Networking**: `--net` re-attaches the primary NIC, `--net-add` adds one, `--net-remove MAC`
-  removes one (the last NIC can not be removed), `--mac` changes the primary NIC's MAC — detach
-  plus attach, so the guest asks for a new lease. A bare `--net`/`--net-add` name that is not a
-  defined virtual network is attached as a bridge of that name.
-- `--plan` prints the same document with `"planned": true` and touches nothing.
+### When the guest sees it: `effective`
+
+libvirt keeps a **running** domain and its **persisted config** apart, and the two do not change
+with the same call. So every entry in `changes[]` says which one moved:
+
+| `effective` | Means |
+|---|---|
+| `"now"` | the running guest (or its block device) changed — no reboot needed |
+| `"on-boot"` | written to the persisted config; the guest applies it at the next boot |
+
+A live change that libvirt refuses is **not** an error: the change lands in the config, reports
+`on-boot`, and comes with a warning. Nothing is silently half-applied. `--reboot` (optionally
+with `--wait`) closes the gap, and afterwards the changes report `now`. `--reboot` on its own is
+also a valid request — it is how you make changes that are already sitting in the config
+effective.
+
+**What `modify` compares a request to is the config, not the running guest.** A running domain is
+two documents, and they can disagree (a config-only change nobody ever rebooted into, or a
+`virsh setmem --live` done by someone holding the client). Three answers, in order:
+
+| The state | `modify` says |
+|---|---|
+| guest **and** config already match | `modify-noop` (exit 2) |
+| config matches, guest does not | `on-boot` change with **no** libvirt call — the only thing missing is a reboot |
+| config disagrees | the write you asked for, even if the running guest already looks right, with the config's value as `from` |
+
+The last row matters: answering "already set" to a domain whose config reserves something else is
+how a tool tells you everything is fine about a VM that fails on its next boot.
+
+| Axis | What it does | Live (`--live`) | Config |
+|---|---|---|---|
+| `--vcpu N` | `virsh setvcpus` | hot-plug up to the domain's `<vcpu max>` | always written |
+| `--ram GiB` | `virsh setmaxmem` (ceiling) + `virsh setmem` | balloon, but never above `<memory>` | always written |
+| `--disk GiB` | `virsh blockresize`, or the pool volume when the guest is off | yes — the block device grows | volume is the truth |
+| `--net` / `--net-add` / `--net-remove` / `--mac` | `attach-interface` / `detach-interface` | yes, when the guest runs | also written |
+
+Growing **past** the domain's ceiling (a VM created with `--vcpu 1` that should get 4 vCPUs,
+RAM beyond its `<memory>`) is a two-step write whose ceiling only becomes effective with the
+next boot — so it reports `on-boot` no matter what `--live` you pass. A RAM **shrink** can be
+live; a RAM **grow** usually cannot.
+
+A RAM shrink also has to bring `<memory>` **down** again: `setmem --config` moves
+`<currentMemory>` and leaves the old, bigger total, which is exactly what qemu reserves on the
+next boot — libvirt writes it, so does nothing to stop you, and the guest simply fails to start.
+`modify` writes both halves. It also refuses a `--ram` above the host's installed RAM
+(`runtime-error`, no change): libvirt would accept that into the config without a word, and only
+the boot would find out.
+
+### Growing the disk — and the guest's filesystem
+
+The block device grows first (`blockresize`, or `vol-resize` on the pool volume for a powered-off
+guest; libvirt refuses to shrink a volume without an explicit opt-in, and `modify` never asks
+for that). Then virt-runner grows the **guest's own filesystem** over SSH — `growpart` plus
+`resize2fs` / `xfs_growfs` / `btrfs` — because a bigger disk is useless until the partition and
+the filesystem move in. That step is best effort by contract, and the report says what happened:
+
+- `fs_grown: true` — done, the root filesystem is bigger.
+- `fs_grown: null` — not attempted (`--no-auto-grow-fs`, or the guest is powered off).
+- `fs_grown: false` — attempted and refused by the guest, and the warning names the commands to
+  run inside it. The block device stays grown; nothing rolls back.
+
+The guest filesystem cannot grow when the guest does not run, so **re-issuing the same
+`--disk GiB` is the documented retry** (it plans a filesystem-only grow, `from` equals `to`, and
+is not a `modify-noop`). LVM layouts, a missing `growpart`, or an unbootable guest are reported,
+never guessed at.
+
+### Interfaces
+
+- `--net SPEC` re-attaches the **primary** NIC: `network=NAME` for a libvirt virtual network,
+  `bridge=NAME` for a host bridge. A bare name that is not a defined virtual network is attached
+  as a bridge of that name — with a warning, because that device has to exist on the host.
+- `--net-add SPEC` adds a NIC (`network=` / `bridge=`, optional `,mac=52:54:00:11:22:33`). It is
+  repeatable. Adding a second NIC to the **same** network can make the guest lose SSH
+  reachability on its old address (both NICs answer the same subnet) — attach extra NICs to a
+  separate network or bridge.
+- `--net-remove MAC` detaches one NIC by MAC, repeatable. Removing the **last** NIC is refused
+  (`usage`, exit 2) — add the replacement with `--net-add` first, in the same call.
+- `--mac MAC` rewires the primary NIC (detach + attach). The guest re-acquires a lease, so
+  **expect a new address**: `virt-runner list` after the change is what tells you where it is now.
+
+`--net-add`/`--net-remove`/`--mac`/`--net` change the MAC-level identity of a guest; anything you
+run against its old address (ssh sessions, `known_hosts`, DNS entries) is yours to update.
+
+### Refused, on purpose
+
+| Request | Result |
+|---|---|
+| `--disk` smaller than the current size | `disk-shrink-unsupported` (exit 1) — recreate the VM for a smaller disk |
+| every value given already matches the guest **and** its config | `modify-noop` (exit 2) |
+| `--ram` above the host's installed RAM | `runtime-error` (exit 1) — libvirt would write it and the guest would not boot |
+| `--net-remove` of the only/last NIC | `usage` (exit 2) |
+| a domain virt-runner did not create | `not-a-virt-runner-vm` (exit 1) — managed with `virsh` by hand |
+| a name that is not defined | `vm-not-defined` (exit 1) |
+| nothing requested at all | `usage` (exit 2) |
+
+`modify` never touches a domain that is not its own, never shrinks storage, and never leaves a
+running guest without an interface. Everything it changes is visible in the `vm-modify` JSON
+document: `vm` is the state **before** the change, `changes[]` is what moved, and `warnings[]`
+carries every "only on next boot"/"do it by hand" note.
+
+### Out of scope
+
+Disk or volume shrinking, adding/removing `--mount` shares on an existing VM (destroy and
+recreate — `modify` has no mount flags), renaming a domain, snapshots, changing the distro
+image/release, `--net` types other than `network=`/`bridge=` (direct/user/ethernet NICs), the
+CPU model or NUMA topology, and batch changes across several VMs (call it per name).
+
+```bash
+virt-runner modify myvm --json | jq '{changes: [.changes[].field], eff: [.changes[].effective]}'
+```
 
 ## Shared directories
 
@@ -265,7 +363,9 @@ virt-runner create dev --script setup.sh --script configure.py
 `tests/integration_test.py` is an end-to-end suite against the real host: creates
 four VMs (two Ubuntu, one Arch, one Fedora; the Arch leg is skipped on aarch64
 hosts — arch-boxes ships x86_64-only images), lists them, runs a hello world via SSH in each (using
-the reported `ssh_command`), opens a `ssh <name>` session into each, destroys them all,
+the reported `ssh_command`), opens a `ssh <name>` session into each, exercises `modify` on one
+running guest (plan, refusals, vCPU/RAM/disk with a reboot and an in-guest check, a NIC round
+trip, the same change set on a powered-off guest), destroys them all,
 and verifies they're gone. Every call goes through `--json`, so it also enforces that
 stdout stays valid JSON at every step.
 
@@ -343,5 +443,9 @@ project's `.claude/skills/`).
 | `no DHCP lease after 120s` / `SSH … not reachable yet` | `virsh console NAME` (Ctrl-`]` to detach) to watch the guest; for SSH make sure you use the key the VM was given: `ssh -i ~/.ssh/virt_runner_key ubuntu@IP` (`virt-runner ssh NAME` picks up the right user automatically; for Arch that is `arch`, for Fedora that is `fedora`) |
 | `SHA256 mismatch` | Corrupt cache: delete `~/vm-images/<release>/` and retry |
 | disk survives `destroy` | `virsh vol-delete NAME_vda.qcow2 vm-pool` |
-| `modify` reports `effective: on-boot` and the guest still shows the old size | libvirt could not hot-plug it (above the domain's ceiling, or no balloon/vcpu hot-add): `virt-runner modify NAME --reboot --wait` |
+| `modify` reports `effective: on-boot` and the guest still shows the old size | expected for anything above the domain's ceiling (vCPU max, `<memory>`) or a powered-off guest: `virt-runner modify NAME --reboot --wait`, then check inside the guest (`nproc`, `MemTotal`, `lsblk`) |
 | `modify` grew the disk but `df` did not move | the guest-side grow was best effort (LVM, or no `growpart`): run the commands from the warning inside the guest (`sudo growpart /dev/vda N`, `sudo resize2fs`/`xfs_growfs`), then `virt-runner modify NAME --disk <same-size>` to retry |
+| `net-change-failed` after `--net`/`--net-add` | the target does not exist on the host: `virsh net-list --all` (virtual network) or `ip link` (bridge). The target is checked **before** anything is detached, so the guest keeps its NIC — but check `virsh domiflist NAME` anyway before you retry |
+| the guest boots with a different amount of RAM/vCPUs than `virt-runner list` reports | the running domain and its config had drifted (`virsh dumpxml --inactive NAME` is what the next boot gets). Re-issue the `modify` for that axis: it compares against the config, writes what is missing, and reports `on-boot` |
+| guest stopped answering SSH right after `--mac`/`--net` | it re-acquired a lease: `virt-runner list --json \| jq -r '.vms[] \| select(.name=="NAME") \| .ip'` and use the new address |
+| `modify NAME` says the VM was not created by virt-runner | correct, if its disk is not in `vm-pool` or it carries no virt-runner metadata — that domain is not yours to resize |
