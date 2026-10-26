@@ -36,8 +36,10 @@ References (load when needed):
    when done unless the user wants it kept.
 7. `virt-runner ssh` is **interactive only** (no remote-command argument). For non-interactive
    commands use the `ssh_command` from `create --json` / `list --json` (see below).
-8. **`modify` edits a live resource.** Read first (`list --json`, which reports state, MAC and
-   disk), plan first (`--plan`) when the change is not obvious, and re-check the guest afterwards
+8. **`modify` edits a live resource.** Read first (`list --json` reports state, MAC, address and
+   sizing — sizing from the **live** XML, so a change that is only in the config reads back as the
+   old value until someone reboots; `virsh dumpxml --inactive NAME` is what the next boot gets),
+   plan first (`--plan`) when the change is not obvious, and re-check the guest afterwards
    (`--reboot --wait`, or the reported `effective`). It never shrinks a disk and never touches a
    domain virt-runner did not create — do not try to work around that; report it to the user.
 
@@ -90,7 +92,10 @@ not `vm-c`). Use the full names in anything you write to disk so the command sta
 | `--json` | off | One JSON document on stdout |
 
 Timing: ~2 min cold (image download), ~20 s with a warm cache. IP wait up to 120 s, SSH
-verify up to 90 s. VM is reachable by IP and as `NAME.default`.
+verify up to 90 s. The **IP** is the address to rely on: `NAME.default` resolves only when the
+network XML declares `<domain name='netname'/>` and the host forwards that domain, so on a host
+whose resolver points at the LAN it answers nothing. Tell libvirt's dnsmasq apart from host
+resolution with `dig +short @192.168.122.1 <vm-name>`.
 
 Pipeline stages (reported as `error.stage`): `preflight` → `image` → `cloud-init` → `create`
 → `wait-ip` → `ssh-verify` → `script`.
@@ -125,12 +130,12 @@ change option; all composable in one call.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--vcpu N` | — | int ≥ 1. `virsh setvcpus`; live hot-plug works only up to `<vcpu max>`, so a grow past it lands `on-boot` |
-| `--ram GiB` | — | int ≥ 1, **GiB**. `virsh setmaxmem` (ceiling) + `virsh setmem`; grow above `<memory>` is config-only, a shrink can be live. Refused above the host's installed RAM (`runtime-error`), because libvirt would write it and only the boot would notice |
+| `--vcpu N` | — | int ≥ 1. `virsh setvcpus`. Live **grow** works only when the live XML already carries a `<vcpu max>` above the current count; a shrink is refused unless CPUs are marked hotpluggable, and `changes[].live_refused` carries libvirt's reason. Even a live `"now"` can leave the guest with the same `nproc` (see gotchas) |
+| `--ram GiB` | — | int ≥ 1, **GiB**. `virsh setmaxmem` (ceiling) + `virsh setmem`; grow above `<memory>` is config-only, a shrink balloons `currentMemory` live (so it can inflate back until a reboot pins it). Refused above the host's installed RAM (`runtime-error`), because libvirt would write it and only the boot would notice |
 | `--disk GiB` | — | int ≥ 1, **grow only** (`disk-shrink-unsupported`). `blockresize`, or the pool volume when the guest is off, then the guest-side filesystem grow |
 | `--no-auto-grow-fs` | off | skip the SSH filesystem grow: the block device grows, `fs_grown: null`, warning with the manual commands |
 | `--net SPEC` | — | re-attach the **primary** NIC. `network=NAME` (libvirt virtual network) or `bridge=NAME` (host bridge). A bare name that is not a defined network is attached as a bridge of that name — and that bridge must exist on the host |
-| `--net-add SPEC` | — | repeatable. `network=NAME` / `bridge=NAME`, optional `,mac=52:54:00:11:22:33`. Nothing else is accepted in the spec |
+| `--net-add SPEC` | — | repeatable. `network=NAME` / `bridge=NAME`, optional `,mac=52:54:00:11:22:33`. Nothing else is accepted in the spec, and a bare name here means a *libvirt network* (no bridge fallback, unlike `--net`). Without `,mac=` the tool picks the address itself, so `to.mac` is filled in both the plan and the result |
 | `--net-remove MAC` | — | repeatable, exact lower-case MAC. The **last** NIC is refused (`usage`, exit 2) — `--net-add` the replacement in the same call |
 | `--mac MAC` | — | primary NIC's new MAC (detach + attach). The guest re-acquires a lease ⇒ new IP, re-read it with `list` |
 | `--live` | off | ask libvirt for the running change of vCPU/RAM too. Best effort — a refusal degrades to `on-boot` + warning, it is not a failure |
@@ -150,7 +155,11 @@ missing); config disagrees → the write happens, with the config's value as `fr
 - `"on-boot"` — config only. Re-run with `--reboot --wait` if the change has to be live now,
   otherwise say so in your report rather than pretending the guest has it.
 - After `--reboot`, entries report `now`; if you did not reboot, do not report "the VM has 4
-  vCPUs" on the strength of a `"now"` that came from a different axis.
+  vCPUs" on the strength of a `"now"` that came from a different axis. A call of `--reboot` alone
+  is a legitimate request (the config is already right) and reports `"changes": []` — that is not
+  "nothing happened", it is the reboot applying what was already there.
+- When `--live` was asked for and libvirt said no, the entry says `"on-boot"` **and** carries
+  `live_refused` with libvirt's own words. Read it before you go looking for a ceiling problem.
 
 **Disk grows in two steps, and only the first one is guaranteed:** the block device, then the
 guest's own partition + filesystem over SSH (`growpart` + `resize2fs`/`xfs_growfs`/`btrfs`).
@@ -158,12 +167,18 @@ guest's own partition + filesystem over SSH (`growpart` + `resize2fs`/`xfs_growf
 `false` (the guest refused — LVM, no `growpart`; the warning lists the commands). **Re-issuing
 the same `--disk GiB` is the retry** — it plans a filesystem-only grow (`from == to`) and is not
 a noop. A powered-off guest gets a bigger volume and grows its filesystem on the next boot.
+Expect `df` to report a filesystem slightly smaller than the block device: `growpart` leaves an
+alignment gap, so 22 GiB of disk showing 21 GiB of filesystem is a clean grow, not a partial one.
 
-**Interfaces:** attach/detach is live when the guest runs. Adding a second NIC to the *same*
-network can make the guest lose SSH on its old address — put extra NICs on a separate
-network/bridge. A `net-change-failed` means the target does not exist (`virsh net-list --all`,
-`ip link`) and nothing was detached — the target is validated **before** the old NIC is given up,
-so a typo cannot leave a running guest without an interface. `virsh domiflist NAME` confirms.
+**Interfaces:** attach/detach is live when the guest runs. A second NIC is only harmless when the
+network it joins has **no DHCP** — two NICs answering DHCP on one network is how a guest loses
+SSH on its old address, so put extra NICs on an isolated or separate network. `ip -br addr` and
+`ip route` inside the guest are what decide it. A `net-change-failed` means the target does not
+exist (`virsh net-list --all`, `ip link`) and nothing was detached — the target is validated
+**before** the old NIC is given up, so a typo cannot leave a running guest without an interface.
+That check only asks whether the target *exists*, never whether it is usable: `--net` onto a
+network without DHCP plans clean and then isolates the guest. `virsh domiflist NAME` confirms
+what the domain has now.
 
 **If the command fails, read the `applied` flag.** A failed apply lists the changes
 it *attempted*; the ones that never ran carry `"applied": false`. Never infer from
@@ -175,9 +190,10 @@ virt-runner modify dev --vcpu 4 --ram 8 --disk 40 --reboot --wait --json | jq '.
 target=$(virt-runner list --json | jq -r '.vms[] | select(.name=="dev" and .ip) | "\(.ssh_user)@\(.ip)"')
 ssh "${SSHO[@]}" "$target" 'nproc; grep MemTotal /proc/meminfo; lsblk -bdno SIZE /dev/vda; df -BG / | tail -1'
 
-# round-trip a NIC: add, prove it, remove it
-virt-runner modify dev --net-add mgmt --json | jq -r '.changes[0].to.mac'
-virt-runner modify dev --net-remove 52:54:00:11:22:33 --json
+# round-trip a NIC: add, prove it, remove it. to.mac is the address that was set.
+# A bare name for --net-add must be a defined libvirt network (virsh net-list --all).
+virt-runner modify dev --net-add network=mgmt --json | jq -r '.changes[0].to.mac'
+virt-runner modify dev --net-remove <that MAC> --json
 
 # powered-off guest: everything is config, nothing is live
 virt-runner modify dev --vcpu 2 --disk 20 --plan --json | jq '.changes[].effective'   # ["on-boot","now"]
@@ -188,6 +204,20 @@ Errors: `vm-not-defined` (exit 1), `not-a-virt-runner-vm` (exit 1), `modify-noop
 `runtime-error` when `--ram` is bigger than the host's RAM,
 plus `usage` (exit 2) for a bad MAC / missing network / last NIC / no option at all. Exit codes
 follow the usual rule (`0` ok, `1` runtime, `2` usage).
+
+**Trying the NIC flags without betting the VM.** The host usually has only `default`, and
+attaching to anything else either fails or lands on a docker bridge. A throwaway isolated network
+makes the round trip safe, because it has no DHCP and no forward: `virsh net-define` a file with
+`<forward mode='none'/>` and a `<bridge name='virbr-iso'/>` (names must be ≤15 chars),
+`virsh net-start` it, and remove it with `virsh net-destroy agent-iso && virsh net-undefine
+agent-iso`. It is still someone else's host config: define it only to test, autostart nothing,
+and tear it down when done.
+
+`scripts/network-modify-test.sh` runs the whole networking matrix (every guard, a hot-plug seen
+from inside the guest, the `--mac` lease change) against a VM it creates itself, and prints
+PASS/FAIL per check; `RUN_DHCP_RISK=1` adds the stage that puts a second NIC on a DHCP network
+and can cut its own SSH. Prefer it over improvising when the question is "does networking still
+work".
 
 ### setup
 
@@ -351,8 +381,20 @@ More in `references/troubleshooting.md`.
   `nproc` / `MemTotal` / `lsblk` says what the OS sees, and `vm` in the document is the state
   **before** the change.
 - A RAM **grow** almost never lands live (it is capped by `<memory>`), so `--live` is not a
-  promise. A RAM **shrink** can balloon live. Growing vCPUs past the domain's ceiling is the
-  same story: config now, guest at the next boot.
+  promise. A RAM **shrink** balloons `currentMemory` live, which is why a live shrink can inflate
+  itself back until a reboot pins `<memory>`; grep `currentMemory` when you check, not just
+  `<memory`. **vCPUs are live-able only from the config upward**: with `<vcpu>4</vcpu>` (max equal
+  to current, so no hotpluggable CPUs) libvirt refuses any change, grow included; once a config
+  write has raised the ceiling (`<vcpu current='2'>4</vcpu>`) a live grow works and a live shrink
+  usually does not. Read `changes[].live_refused` before concluding it is a ceiling problem.
+- **A vCPU `"now"` is the weakest `"now"` there is.** A live CPU add succeeded on a 1-vCPU guest,
+  libvirt said `now`, the live XML said `current='2'` — and `nproc` stayed 1. The device was
+  present (`/sys/devices/system/cpu/present` = `0-1`) but the guest kernel had left cpu1 offline,
+  online by hand via `/sys/devices/system/cpu/cpu1/online`. For CPU only, `now` means "libvirt
+  enabled it", nothing more; a reboot is what makes the guest use it.
+- `jq` invents absent keys as `null`, so a query can "verify" a field that is not in the document
+  at all. When a check comes back `null`, ask what the document actually has:
+  `jq '.vms[0] | keys'`. That is how `list` once read as if it reported sizing.
 - `--mac`/`--net` change the interface's identity, so the guest gets a **new lease**: an old
   `known_hosts` entry, a running session, or a hardcoded IP from earlier output is stale.
 - `--net` with a name libvirt does not know is attached as a *bridge* of that name. If no such

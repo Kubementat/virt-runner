@@ -76,6 +76,7 @@ Presence of `vm` in an error document ⇒ the domain exists ⇒ you must `destro
   "vms": [{
     "name": "dev", "uuid": "…", "state": "running", "mac": "52:54:00:…",
     "ip": "192.168.122.57", "ip_status": "lease | not-running | running-no-lease | no-mac",
+    "vcpu": 2, "ram_gib": 3, "disk_gib": 22,
     "ssh_user": "ubuntu",
     "ssh_command": "ssh -i … ubuntu@192.168.122.57",
     "console_command": "virsh console dev",
@@ -84,7 +85,11 @@ Presence of `vm` in an error document ⇒ the domain exists ⇒ you must `destro
 }
 ```
 
-`ip`, `ssh_user`, `ssh_command` are `null` unless `ip_status == "lease"`. `list` needs libvirt
+`ip`, `ssh_user`, `ssh_command` are `null` unless `ip_status == "lease"`; `vcpu`/`ram_gib`/`disk_gib`
+are `null` when the size could not be read. The three sizes come from the **live** XML (plus the
+pool volume for the disk), i.e. what the guest runs — a change that is only in the config reads
+back as the old value until someone reboots, and `virsh dumpxml --inactive NAME` is what the next
+boot gets. `list` needs libvirt
 and a *defined* (not necessarily active) `vm-pool`; failures: `libvirt-unreachable`, `pool-not-found`.
 
 ## ssh (`vm-ssh`)
@@ -135,10 +140,16 @@ The process exits with ssh's exit code when non-zero. Errors carry `name` (and `
   needs — and `modify-noop` fires only when both sides match.
 - `changes[].field`: `vcpu`, `ram_gib`, `disk_gib`, `interface` (add or remove; `from`/`to` carry
   the NIC document, `null` on the absent side), `network` (the primary NIC's new source), `mac`.
+  An added NIC always carries the MAC that was set: give `,mac=` or take the one the tool
+  generated, and `--net-remove` that value. No `virsh domiflist` round trip is needed to learn it.
 - `changes[].effective`: `"now"` (running guest changed) or `"on-boot"` (config only, applied at
   the next boot). `disk_gib` also carries `fs_grown`: `true` grown, `false` attempted and refused
   by the guest (block device stays grown), `null` not attempted (`--no-auto-grow-fs`, or a
   powered-off guest — retry after boot by re-issuing the same `--disk`).
+- `changes[].live_refused` appears on an entry whose live attempt libvirt turned down, with
+  libvirt's own words ("failed to find appropriate hotpluggable vcpus", …). The same text is in
+  the matching warning. It explains *why* an entry is `on-boot` despite `--live`; it is not an
+  error and the change is still applied to the config.
 - `planned` is `true` for `--plan`; `rebooted` says whether the guest was power-cycled; `ip` is
   the current address, or the freshly waited one with `--reboot --wait`.
 - `warnings[]` is where every "only on next boot" and "do this by hand inside the guest" note
