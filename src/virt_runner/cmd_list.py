@@ -28,6 +28,9 @@ def _vm_document(vm: VmInfo, display_user: str, identity: str) -> dict[str, Any]
         "mac": vm.mac or None,
         "ip": ip,
         "ip_status": vm.ip_status,
+        "vcpu": vm.vcpu,
+        "ram_gib": vm.ram_gib,
+        "disk_gib": vm.disk_gib,
         "ssh_user": ssh_user,
         **output.access_commands(vm.name, ssh_user, ip, identity),
     }
@@ -55,6 +58,10 @@ def _text_block(vm: VmInfo) -> list[str]:
     return [
         headline,
         f"Name:    {vm.name}   (UUID {vm.uuid})",
+        (
+            f"Sizing:  {vm.vcpu or '?'} vCPU / {vm.ram_gib or '?'} GiB RAM / "
+            f"{vm.disk_gib or '?'} GiB disk   (live XML: what the guest runs now)"
+        ),
         ip_line,
         ssh_line,
         *output.text_access_lines(vm.name),

@@ -17,7 +17,7 @@ applied to the running domain is written to the persisted config and reported as
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import click
@@ -411,8 +411,13 @@ def _plan_interfaces(spec: VmSpec, req: Request, changes: list[Change]) -> None:
             changes.append(Change("mac", primary.mac, wanted_mac, effective, ops))
         remaining[0] = replacement
 
-    for iface in req.add:
-        if iface.mac and any(i.mac == iface.mac for i in remaining):
+    for requested in req.add:
+        # libvirt would pick the MAC at attach time, which leaves both the plan
+        # and the result document carrying `mac: ""` — an empty field a caller
+        # then has to go hunting for in `virsh domiflist`. Claiming one here puts
+        # the same address in the plan, the apply and the document.
+        iface = replace(requested, mac=requested.mac or Virtualizer.generate_mac())
+        if any(i.mac == iface.mac for i in remaining):
             raise click.UsageError(
                 f"interface with MAC '{iface.mac}' already exists on '{spec.name}'"
             )
@@ -508,26 +513,26 @@ def apply_changes(ctx: ApplyContext, changes: list[Change]) -> None:
 
 def _apply_vcpu(ctx: ApplyContext, change: Change, vcpu: int) -> None:
     """Persist the vCPU count, hot-plugging first when ``--live`` was given."""
-    change.effective = (
-        EFFECTIVE_NOW
-        if ctx.v.set_vcpu(ctx.spec.name, vcpu, live=ctx.live, ceiling=ctx.spec.vcpu_max)
-        else EFFECTIVE_ON_BOOT
+    live_ok, why = ctx.v.set_vcpu(
+        ctx.spec.name, vcpu, live=ctx.live, ceiling=ctx.spec.vcpu_max
     )
+    change.effective = EFFECTIVE_NOW if live_ok else EFFECTIVE_ON_BOOT
+    if why:
+        change.extra["live_refused"] = why
 
 
 def _apply_ram(ctx: ApplyContext, change: Change, ram_gib: int) -> None:
     """Persist the RAM size, ballooning first when ``--live`` was given."""
-    change.effective = (
-        EFFECTIVE_NOW
-        if ctx.v.set_ram_gib(
-            ctx.spec.name,
-            ram_gib,
-            live=ctx.live,
-            ceiling=ctx.spec.ram_max_kib,
-            config_ceiling=ctx.spec.config_ram_kib,
-        )
-        else EFFECTIVE_ON_BOOT
+    live_ok, why = ctx.v.set_ram_gib(
+        ctx.spec.name,
+        ram_gib,
+        live=ctx.live,
+        ceiling=ctx.spec.ram_max_kib,
+        config_ceiling=ctx.spec.config_ram_kib,
     )
+    change.effective = EFFECTIVE_NOW if live_ok else EFFECTIVE_ON_BOOT
+    if why:
+        change.extra["live_refused"] = why
 
 
 def _replace_nic(
@@ -625,8 +630,16 @@ def _warn_on_boot(ctx: ApplyContext, change: Change) -> None:
 
 
 def on_boot_warning(change: Change) -> str:
-    """The hint that a change the guest only applies at boot carries."""
+    """The hint that a change the guest only applies at boot carries.
+
+    When the running domain *was* asked and libvirt said no, its own words go in
+    too — "applies on next boot" alone leaves the reader guessing whether the
+    tool gave up early or libvirt has a real limitation.
+    """
     label = _LABELS.get(change.field, change.field)
+    refused = change.extra.get("live_refused")
+    if refused:
+        return f"{label} change applies on next boot ({refused}) — consider --reboot"
     return f"{label} change applies on next boot — consider --reboot"
 
 
