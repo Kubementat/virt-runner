@@ -516,14 +516,32 @@ def main() -> None:
             fields["disk_gib"]["fs_grown"] is True,
             f"guest filesystem reported grown, got {fields['disk_gib']}",
         )
-        # Everything asked for is now the current config: the same request has
-        # nothing left to do, which is the persistence check.
+        # Everything asked for is now the current config for the *sizing*: asking
+        # for 2 vCPU and 2 GiB again has nothing left to do, which is the
+        # persistence check. The disk is left out — re-issuing `--disk` is the
+        # filesystem-grow retry, and by contract that is a change, not a noop.
         doc, rc = virt_runner(
-            "modify", name, "--vcpu", "2", "--ram", "2", "--disk", "16", allow_fail=True
+            "modify", name, "--vcpu", "2", "--ram", "2", allow_fail=True
         )
         check(
             rc == 2 and doc["error"]["code"] == "modify-noop",
             f"the new sizing is persisted ({name}), got {doc['error']} / {rc}",
+        )
+        # The documented retry: same size, no block resize, guest-side grow again.
+        # A partition that is already at full size is a success (growpart says
+        # "no space left to grow into"), so it must not come back refused.
+        doc, rc = virt_runner("modify", name, "--disk", "16")
+        check(
+            doc["status"] == "success"
+            and [
+                (c["field"], c["from"], c["to"], c["effective"]) for c in doc["changes"]
+            ]
+            == [("disk_gib", 16, 16, "now")],
+            f"re-issuing --disk 16 is a filesystem-only grow, got {doc['changes']}",
+        )
+        check(
+            doc["changes"][0]["fs_grown"] is True,
+            f"an already-grown filesystem reports grown, got {doc['changes'][0]}",
         )
         doc, _ = virt_runner("list")
         vm = next(vm for vm in doc["vms"] if vm["name"] == name)
