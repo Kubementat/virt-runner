@@ -782,6 +782,13 @@ def main() -> None:
     assert vz.parse_vm_spec("<domain><name>x</name></domain>") is None
     assert vz.parse_vm_spec("not xml at all") is None
 
+    # A guest-side grow is a shell script, and its exit codes are contract too.
+    # growpart says "1" for *already as large as possible*, so a retry of an
+    # already-grown disk must not come back as fs_grown: false.
+    assert 'growpart "$dev" "$part"' in vz._FS_GROW_SCRIPT
+    assert 'if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then' in vz._FS_GROW_SCRIPT
+    assert "-ne 5" not in vz._FS_GROW_SCRIPT
+
     # Lease lookups: dnsmasq keeps an old lease next to the renewed one, and the
     # guest answers on the newer address. First match would hand SSH an address it
     # no longer has — which reads as a timeout, never as a wrong IP.

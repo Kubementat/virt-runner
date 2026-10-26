@@ -1964,8 +1964,11 @@ if [ -n "$part" ]; then
   fi
   growpart "$dev" "$part"
   rc=$?
-  # growpart exit 5 means "already as large as it can be" — nothing to do.
-  if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then
+  # growpart's own exit status (see its man page): 0 = grown, 1 = there was no
+  # space left to grow into, i.e. already as large as it can be, 2 = error. So 1
+  # is a *success* for us — treating it as failure is how a perfectly healthy
+  # guest gets told its filesystem was "not grown".
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then
     echo "virt-runner: growpart $dev $part failed (exit $rc)"
     exit 1
   fi

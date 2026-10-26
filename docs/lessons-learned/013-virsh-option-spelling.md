@@ -39,6 +39,32 @@ $ virsh -c qemu:///system vol-resize dev_vda.qcow2 --pool vm-pool --capacity 16G
 so the "defence in depth" flag the code was carrying bought nothing. (The planner refuses a
 smaller `--disk` upstream as well.)
 
+## Same class of bug, one layer down: exit codes
+
+`_FS_GROW_SCRIPT` grew the guest partition with `growpart "$dev" "$part"` and treated
+**exit 5** as "already as large as it can be". That number appears nowhere in growpart's
+manual:
+
+```
+EXIT STATUS
+  The exit status is 0 if the partition was successfully grown ... The exit status is 1 if
+  the partition could not be grown due to lack of available space. The exit status is 2 if an
+  error occurred.
+```
+
+So the *actual* "nothing left to do" answer — 1 — fell through to `exit 1`, which `modify`
+conveys as `fs_grown: false` plus "guest filesystem was not grown". The first grow of a fresh
+disk worked (rc 0), which is exactly why nobody noticed: the bug only shows on the second
+request, which is the documented retry.
+
+Two things to take away, both cheap to apply:
+
+- A magic number in an exit-code comparison is a claim about another program's manual. Quote the
+  manual, or test the second run — the first run of any "grow/resize/install" path is the one
+  that hides the bug.
+- Every `rc != N` guard needs the same proof as a `virsh` flag: what does the program actually
+  return, on the host, with the layout we claim to support.
+
 ## How to keep this out of the codebase
 
 - **Run the exact command line** the code will build, on a host, *before* writing the
@@ -49,6 +75,7 @@ smaller `--disk` upstream as well.)
   survived a green `./scripts/check.sh --all`.
 - **Pin the argv.** `tests/unit_test.py` stubs `vz._run`/`vz._spawn`, records the argv of the
   ceiling/volume calls, and asserts the exact flags. That fails the moment anyone writes a
-  flag that does not exist, without needing a host.
+  flag that does not exist, without needing a host. The same trick pins the guest-side grow
+  script's exit-code contract, which is a claim about `growpart`, not about libvirt.
 - When a command errors with "doesn't support option", the fix is usually *another command*,
   not another flag.
