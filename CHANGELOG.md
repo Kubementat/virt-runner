@@ -7,6 +7,10 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ## [Unreleased]
 
+_No unreleased changes at present._
+
+## [0.6.0] - 2026-10-26
+
 ### Added
 
 - **`virt-runner modify NAME`** (alias `m`) — change an existing virt-runner VM instead of
