@@ -7,6 +7,10 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ## [Unreleased]
 
+_No unreleased changes at present._
+
+## [0.7.0] - 2026-10-26
+
 ### Added
 
 - **`vm-list` reports sizing.** `list --json` gained `vcpu`, `ram_gib` and `disk_gib` per VM,
