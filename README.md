@@ -147,7 +147,9 @@ virt-runner create myvm --json | jq -r .vm.ssh_command
   failure belongs to a `create` stage (`preflight`, `image`, `cloud-init`,
   `create`, `wait-ip`, `ssh-verify`, `script`).
 - The remaining top-level keys are the command's sections (`vm`, `image`,
-  `vms`, …) — the same state the text report prints.
+  `vms`, …) — the same state the text report prints. `vm-list` entries carry
+  `vcpu`/`ram_gib`/`disk_gib` read from the **live** XML, i.e. what the guest runs:
+  a change that is only in the config reads back as the old value until a reboot.
 
 Exit codes never change with `--json`: `0` success, `1` runtime or preflight
 failure, `2` usage error.
@@ -235,7 +237,7 @@ how a tool tells you everything is fine about a VM that fails on its next boot.
 
 | Axis | What it does | Live (`--live`) | Config |
 |---|---|---|---|
-| `--vcpu N` | `virsh setvcpus` | hot-plug up to the domain's `<vcpu max>` | always written |
+| `--vcpu N` | `virsh setvcpus` | grow only, and only once `<vcpu max>` is above the current count — a shrink is refused | always written |
 | `--ram GiB` | `virsh setmaxmem` (ceiling) + `virsh setmem` | balloon, but never above `<memory>` | always written |
 | `--disk GiB` | `virsh blockresize`, or the pool volume when the guest is off | yes — the block device grows | volume is the truth |
 | `--net` / `--net-add` / `--net-remove` / `--mac` | `attach-interface` / `detach-interface` | yes, when the guest runs | also written |
@@ -244,6 +246,11 @@ Growing **past** the domain's ceiling (a VM created with `--vcpu 1` that should 
 RAM beyond its `<memory>`) is a two-step write whose ceiling only becomes effective with the
 next boot — so it reports `on-boot` no matter what `--live` you pass. A RAM **shrink** can be
 live; a RAM **grow** usually cannot.
+
+vCPU is the one axis where `"now"` is not guest truth. A live CPU add that libvirt accepted can
+leave the guest with the same `nproc`, because the kernel only brings CPUs online while booting:
+the device is in `/sys/devices/system/cpu/present`, `cpuN/online` is `0`. If the CPU count has to
+be real *now*, say `--reboot --wait` and confirm with `nproc`.
 
 A RAM shrink also has to bring `<memory>` **down** again: `setmem --config` moves
 `<currentMemory>` and leaves the old, bigger total, which is exactly what qemu reserves on the
@@ -276,9 +283,11 @@ never guessed at.
   `bridge=NAME` for a host bridge. A bare name that is not a defined virtual network is attached
   as a bridge of that name — with a warning, because that device has to exist on the host.
 - `--net-add SPEC` adds a NIC (`network=` / `bridge=`, optional `,mac=52:54:00:11:22:33`). It is
-  repeatable. Adding a second NIC to the **same** network can make the guest lose SSH
-  reachability on its old address (both NICs answer the same subnet) — attach extra NICs to a
-  separate network or bridge.
+  repeatable. Without `,mac=` the address is chosen while the change is planned, so `to.mac` in
+  the plan and in the result is the MAC that really gets set — `--net-remove` can use it directly.
+  Adding a second NIC to a network **that has DHCP** can make the guest lose SSH reachability on
+  its old address (both NICs answer the same subnet) — attach extra NICs to a separate network or
+  bridge, or to an isolated `forward mode='none'` one where nothing competes.
 - `--net-remove MAC` detaches one NIC by MAC, repeatable. Removing the **last** NIC is refused
   (`usage`, exit 2) — add the replacement with `--net-add` first, in the same call.
 - `--mac MAC` rewires the primary NIC (detach + attach). The guest re-acquires a lease, so

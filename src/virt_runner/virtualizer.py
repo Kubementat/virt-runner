@@ -247,6 +247,9 @@ class VmInfo:
     mac: str
     ip: str
     ip_status: str
+    vcpu: int | None = None
+    ram_gib: int | None = None
+    disk_gib: int | None = None
     meta: dict[str, str] = field(default_factory=dict)
 
     @property
@@ -522,6 +525,22 @@ def _poll(check, timeout_s: float, interval: float):
         if result or time.monotonic() >= deadline:
             return result
         time.sleep(interval)
+
+
+def _live(cmd: list[str]) -> tuple[bool, str]:
+    """Attempt one live libvirt change: ``(ok, reason)`` with libvirt's own words.
+
+    libvirt refuses a live change for reasons that all look the same from the
+    exit code — no hot-pluggable vCPUs, a ceiling the guest cannot cross, an
+    older libvirt — and the distinction decides whether the caller retries, asks
+    for a reboot, or reports a limitation. Whitespace is collapsed so a
+    multi-line ``error:`` block stays one warning.
+    """
+    result = _spawn(cmd)
+    if result.returncode == 0:
+        return True, ""
+    err = " ".join((result.stderr or result.stdout or "").split())
+    return False, err or f"exit {result.returncode}"
 
 
 class Virtualizer:
@@ -1125,13 +1144,21 @@ class Virtualizer:
 
         return "running"
 
-    def domain_xml(self, name: str) -> ET.Element | None:
-        """Parsed ``virsh dumpxml`` of *name*, or ``None`` when unavailable."""
+    def domain_xml_text(self, name: str) -> tuple[ET.Element | None, str]:
+        """Both halves of ``virsh dumpxml``: the parsed tree *and* its text.
+
+        Callers that need the tree and a parser that takes text — like
+        :func:`parse_vm_spec` — get one subprocess instead of two.
+        """
         text = _stdout(["virsh", "dumpxml", name])
         try:
-            return ET.fromstring(text) if text.strip() else None
+            return (ET.fromstring(text) if text.strip() else None), text
         except ET.ParseError:
-            return None
+            return None, text
+
+    def domain_xml(self, name: str) -> ET.Element | None:
+        """Parsed ``virsh dumpxml`` of *name*, or ``None`` when unavailable."""
+        return self.domain_xml_text(name)[0]
 
     def get_domain_uuid(self, name: str) -> str:
         """Return the domain UUID (PI-6: last field of the ``UUID:`` line)."""
@@ -1464,7 +1491,7 @@ class Virtualizer:
 
         results = []
         for name in domain_names:
-            root = self.domain_xml(name)
+            root, xml = self.domain_xml_text(name)
             if root is None or not self._has_disk_in_pool(root, pool_path):
                 continue
 
@@ -1472,6 +1499,12 @@ class Virtualizer:
             mac = self._mac_of(root)
             ip = (self.find_ip_for_mac(lease_file, mac) or "") if mac else ""
             meta_el = root.find(f"metadata/{{{self.METADATA_URI}}}{self.METADATA_KEY}")
+            # Sizing comes from the live XML because that is what the guest runs,
+            # not what its next boot gets; a config-only change therefore reads
+            # back as the old value until someone reboots. The disk is the
+            # exception: its size is only in the volume, never in the XML.
+            spec = parse_vm_spec(xml)
+            volume = self._volume_of(root, pool_path)
 
             results.append(
                 VmInfo(
@@ -1481,6 +1514,9 @@ class Virtualizer:
                     mac=mac,
                     ip=ip,
                     ip_status=ip_status_for(state, mac, ip),
+                    vcpu=spec.vcpu if spec else None,
+                    ram_gib=spec.ram_kib // (1024 * 1024) if spec else None,
+                    disk_gib=self.disk_capacity_gib(name, "", volume),
                     meta=dict(meta_el.attrib) if meta_el is not None else {},
                 )
             )
@@ -1577,17 +1613,21 @@ class Virtualizer:
             return False
         return self._has_disk_in_pool(root, self.get_pool_path().rstrip("/"))
 
-    def disk_volume(self, name: str) -> str | None:
-        """Pool volume backing *name*'s first disk, or ``None`` when outside."""
-        root = self.domain_xml(name)
-        if root is None:
-            return None
-        pool = self.get_pool_path().rstrip("/")
+    @staticmethod
+    def _volume_of(root: ET.Element, pool: str) -> str | None:
+        """Pool volume referenced by *root*'s disks, or ``None`` when outside."""
         for source in root.iterfind("devices/disk/source"):
             path = source.get("file") or ""
             if path.startswith(f"{pool}/") and path != pool:
                 return path[len(pool) + 1 :]
         return None
+
+    def disk_volume(self, name: str) -> str | None:
+        """Pool volume backing *name*'s first disk, or ``None`` when outside."""
+        root = self.domain_xml(name)
+        if root is None:
+            return None
+        return self._volume_of(root, self.get_pool_path().rstrip("/"))
 
     def disk_capacity_gib(
         self, name: str, target: str, volume: str | None
@@ -1656,23 +1696,28 @@ class Virtualizer:
         """``--live --config`` when a change must land on the running domain too."""
         return ["--live", "--config"] if live else ["--config"]
 
-    def set_vcpu(self, name: str, vcpu: int, *, live: bool, ceiling: int) -> bool:
+    def set_vcpu(
+        self, name: str, vcpu: int, *, live: bool, ceiling: int
+    ) -> tuple[bool, str]:
         """Persist the vCPU count; hot-plug first when *live*.
 
         Returns:
-            ``True`` when the running domain was changed as well.
+            ``(live_ok, reason)``: whether the running domain changed, plus
+            libvirt's reason when it refused. ``reason`` is empty when the change
+            worked or no live change was asked for.
 
         Raises:
             RuntimeError: the persisted change failed (a plain ``RuntimeError``
                 keeps the generic ``runtime-error`` code — libvirt's own message
                 is the useful part here).
         """
-        live_ok = (
-            live
-            and _spawn(["virsh", "setvcpus", name, str(vcpu), "--live"]).returncode == 0
+        live_ok, why = (
+            _live(["virsh", "setvcpus", name, str(vcpu), "--live"])
+            if live
+            else (False, "")
         )
         self._write_vcpu_config(name, vcpu, ceiling)
-        return live_ok
+        return live_ok, why
 
     def _write_vcpu_config(self, name: str, vcpu: int, ceiling: int) -> None:
         """``virsh setvcpus --config``, raising ``<vcpu max>`` first when growing.
@@ -1710,7 +1755,9 @@ class Virtualizer:
                 skips the ceiling write.
 
         Returns:
-            ``True`` when the running domain was changed as well.
+            ``(live_ok, reason)``: whether the running domain changed, plus
+            libvirt's reason when the balloon refused. ``reason`` is empty when it
+            worked or no live change was asked for.
 
         Raises:
             RuntimeError: the persisted change failed, or the guest is bigger than
@@ -1725,11 +1772,11 @@ class Virtualizer:
                 f"has {cap // 1024 // 1024} GiB total, and libvirt would write the "
                 "config anyway — the domain would not start (no change was made)"
             )
-        live_ok = (
-            live and _spawn(["virsh", "setmem", name, kib, "--live"]).returncode == 0
+        live_ok, why = (
+            _live(["virsh", "setmem", name, kib, "--live"]) if live else (False, "")
         )
         self._write_ram_config(name, kib, config_ceiling or ceiling)
-        return live_ok
+        return live_ok, why
 
     def host_memory_kib(self) -> int | None:
         """Total RAM of the libvirt host, or ``None`` when it cannot be read.

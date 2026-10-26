@@ -601,6 +601,31 @@ def main() -> None:
             f"{name} is back to 1 NIC inside the guest, got {nics.strip()}",
         )
 
+        # An attach with no MAC given still reports the MAC libvirt would use:
+        # the address is claimed while planning, so the document carries a real
+        # one instead of the empty string a caller cannot act on. Planned only —
+        # nothing here touches libvirt.
+        doc, _ = virt_runner("modify", name, "--net-add", "network=it-none", "--plan")
+        planned_mac = doc["changes"][0]["to"]["mac"]
+        check(
+            re.fullmatch(r"52:54:00(:[0-9a-f]{2}){3}", planned_mac) is not None,
+            f"--net-add without --mac reports the MAC it will use, got {planned_mac!r}",
+        )
+        check(
+            doc["planned"] is True
+            and ssh_run(
+                vm["ssh_command"], "ls /sys/class/net | grep -c '^eth\\|^en'"
+            ).strip()
+            == "1",
+            "a planned NIC add changes nothing in the guest",
+        )
+
+        # `list` answers "what does this VM have" without a round trip to virsh.
+        check(
+            (vm["vcpu"], vm["ram_gib"], vm["disk_gib"]) == (2, 2, 16),
+            f"list reports sizing for {name}, got {vm}",
+        )
+
         # `--no-auto-grow-fs`: the block device grows, the guest is left alone
         # and the report says so instead of pretending otherwise.
         doc, _ = virt_runner("modify", name, "--disk", "20", "--no-auto-grow-fs")

@@ -29,13 +29,16 @@ virsh -c qemu:///system dumpxml --inactive NAME | grep -E '<(memory|vcpu|maxMemo
 virsh -c qemu:///system vol-info --pool vm-pool NAME_vda.qcow2 | grep Capacity              # disk truth
 virsh -c qemu:///system domiflist NAME                                                      # NICs now
 # in the guest:
-nproc; grep MemTotal /proc/meminfo; lsblk -bdno SIZE /vda; df -BG / | tail -1; ls /sys/class/net
+nproc; grep MemTotal /proc/meminfo; lsblk -bdno SIZE /dev/vda; df -BG / | tail -1; ls /sys/class/net
 ```
 
 | Symptom | What happened / what to do |
 |---|---|
 | `effective: "on-boot"`, guest unchanged | the change is in the config, above the live ceiling (`<vcpu max>`, `<memory>`) or the guest was off: `virt-runner modify NAME --reboot --wait`, then re-read from inside the guest |
 | `--ram`/`--vcpu` grow refused with no `--live` effect | expected — a live change cannot move the ceiling. It is still persisted; reboot closes it |
+| `--vcpu` refused live **below** the ceiling | look at the live `<vcpu>`: if max equals current there are no hotpluggable CPUs, so no live change is possible at all. Raise the ceiling through the config (`modify --vcpu N --plan` shows what it will write), reboot once, and live grows will work from then on. `changes[].live_refused` names the reason |
+| vCPU said `"now"`, `nproc` did not move | libvirt enabled the CPU; the guest kernel has not brought it online. `/sys/devices/system/cpu/present` shows it, `/sys/devices/system/cpu/cpuN/online` is `0`. Reboot (`--reboot --wait`) — the guest onlines CPUs while booting |
+| `--ram` live shrink, then the guest has the old size again | a balloon change moves `<currentMemory>`, not `<memory>`, so it can inflate back. Reboot to pin it, and check with `grep MemTotal` rather than `grep memory` in the XML |
 | disk grew, `df` did not move (`fs_grown: false`) | guest-side grow was refused (LVM, missing `growpart`). Run the commands the warning names, then `modify NAME --disk <same-size>` — that is the filesystem-only retry |
 | `fs_grown: null` after a powered-off grow | the guest could not be asked. Boot it, then re-issue the same `--disk` |
 | `net-change-failed` | the target does not exist: `virsh net-list --all` for a virtual network, `ip link` for a bridge. Nothing was detached — the target is validated **before** the old NIC is given up, so the guest is still reachable (`virsh domiflist NAME` proves it). Fix the name and retry |

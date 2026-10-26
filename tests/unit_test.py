@@ -3,6 +3,7 @@
 import json
 import subprocess
 
+import virt_runner.cmd_list as cmd_list
 import virt_runner.cmd_modify as cm
 import virt_runner.virtualizer as vz
 from virt_runner import images
@@ -137,11 +138,17 @@ class FakeVz:
 
     def set_vcpu(self, name, vcpu, *, live, ceiling):
         self.vcpu_calls.append((vcpu, live, ceiling))
-        return live and self.running and vcpu <= ceiling
+        ok = live and self.running and vcpu <= ceiling
+        return ok, (
+            "" if ok or not live else "unsupported configuration: no hotpluggable vcpus"
+        )
 
     def set_ram_gib(self, name, ram_gib, *, live, ceiling, config_ceiling=0):
         self.ram_calls.append((ram_gib, live))
-        return live and self.running and ram_gib * 1024 * 1024 <= ceiling
+        ok = live and self.running and ram_gib * 1024 * 1024 <= ceiling
+        return ok, (
+            "" if ok or not live else "unsupported configuration: over current ceiling"
+        )
 
     def grow_disk(self, name, target, volume, gib):
         self.disks.append((name, target, volume, gib))
@@ -1032,11 +1039,16 @@ def main() -> None:
         live=False,
         auto_grow_fs=True,
     )
-    assert [(c.field, c.to) for c in ch] == [
+    added = ch[1].to
+    masked = [(c.field, None if c.to is None else {**c.to, "mac": "X"}) for c in ch]
+    assert masked == [
         ("interface", None),
-        ("interface", {"type": "bridge", "source": "br1", "mac": ""}),
+        ("interface", {"type": "bridge", "source": "br1", "mac": "X"}),
     ]
-    assert ch[1].to["mac"] == ""
+    # libvirt no longer picks the address at attach time: the plan reports the
+    # MAC that the attach will use, from the same OUI create uses. A caller can
+    # therefore `--net-remove` it straight from this document.
+    assert len(added["mac"].split(":")) == 6 and added["mac"].startswith("52:54:00:")
     ch, _ = cm.plan_changes(
         vm_spec(state="shut off"),
         cm.Request(net=vz.Interface("bridge", "br0", "")),
@@ -1484,6 +1496,39 @@ def main() -> None:
     # Registered as a command, but deliberately not a VM command and not aliased.
     assert cli_main.get_command(None, "setup") is not None
     assert "setup" not in ALIASES
+
+    # vm-list reports sizing, because "what does this VM have" otherwise has no
+    # answer in --json at all: `modify` reads libvirt, `list` used to say nothing.
+    listed = cmd_list._vm_document(
+        vz.VmInfo(
+            name="t1",
+            uuid="u",
+            state="running",
+            mac="52:54:00:00:00:01",
+            ip="192.168.122.5",
+            ip_status=vz.IP_STATUS_LEASE,
+            vcpu=2,
+            ram_gib=3,
+            disk_gib=22,
+        ),
+        "ci",
+        "/id",
+    )
+    assert (listed["vcpu"], listed["ram_gib"], listed["disk_gib"]) == (2, 3, 22), listed
+    # A size that could not be read stays null rather than a guessed number.
+    blank = cmd_list._vm_document(
+        vz.VmInfo(
+            name="t2",
+            uuid="u",
+            state="shut off",
+            mac="",
+            ip="",
+            ip_status="not-running",
+        ),
+        "ubuntu",
+        "/id",
+    )
+    assert (blank["vcpu"], blank["ram_gib"], blank["disk_gib"]) == (None, None, None)
 
     print("unit checks ok")
 

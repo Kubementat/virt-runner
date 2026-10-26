@@ -7,7 +7,49 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ## [Unreleased]
 
-_No unreleased changes at present._
+### Added
+
+- **`vm-list` reports sizing.** `list --json` gained `vcpu`, `ram_gib` and `disk_gib` per VM,
+  read from the live XML (what the guest runs, which is why a config-only change still reads
+  back as the old value until someone reboots) plus the pool volume for the disk. The text
+  output prints the same as a `Sizing:` line. Before this, `list` answered "what does this VM
+  have" with nothing but its address and MAC, and `modify`'s own "read first" advice pointed at
+  a document that had no sizing to read.
+
+### Changed
+
+- **A refused live change now says why.** `--live` used to degrade to `effective: "on-boot"`
+  with a warning that quoted only libvirt's exit code, so every refusal looked alike: "no
+  hot-pluggable vcpus", "higher than max memory" and an older libvirt were indistinguishable.
+  A live attempt now returns `(ok, reason)`, the reason is recorded on the change as
+  `"live_refused"` and quoted inside the warning. No exit code, stage or status changes.
+- **`--net-add` claims the MAC while planning.** Without `--mac`, libvirt picked the address at
+  attach time, which left `mac: ""` in the plan and in the result document — the MAC had to be
+  fetched from `virsh domiflist` before `--net-remove` could be used. The tool now generates one
+  (same `52:54:00` OUI as `create`) and passes it to `attach-interface`, so the plan, the apply
+  and the document all carry the address that was really set.
+
+### Fixed
+
+- The documented workflow for changing a running VM had three places where the honest answer was
+  a `virsh` command and not virt-runner output: which vCPUs/RAM/disk a VM has (`list`), the MAC
+  of a just-attached NIC (JSON), and why a live change failed (`virsh setvcpus --live`).
+
+### Known limitation
+
+- A **vCPU** change reported as `"now"` is still not guest truth: libvirt can enable the CPU and
+  the guest kernel leaves it offline until it boots (present in
+  `/sys/devices/system/cpu/present`, `cpuN/online` = `0`). Use `--reboot --wait` and confirm with
+  `nproc`. The other axes report what the guest really has; this one reports what the hypervisor
+  allowed. Not fixed here — a guest-side check before claiming a CPU is in use is a change to the
+  `modify` contract, not to its text.
+
+### Added — tooling
+
+- `scripts/network-modify-test.sh` — a manual harness for the `modify` networking paths. It
+  asserts each guard refuses without changing anything, checks hot-plug from inside the guest,
+  and proves the IP move a `--mac` change causes. `RUN_DHCP_RISK=1` adds the one stage that can
+  cut its own SSH: a second NIC on a network that has DHCP.
 
 ## [0.6.0] - 2026-10-26
 
