@@ -201,6 +201,17 @@ def parse_capacity_gib(info: str) -> int | None:
     return None
 
 
+def parse_vol_info_bytes(info: str) -> dict[str, int]:
+    """The sized rows of ``virsh vol-info --bytes``: ``{"capacity": …, "allocation": …}``."""
+    rows: dict[str, int] = {}
+    for line in info.splitlines():
+        key, sep, rest = line.partition(":")
+        match = re.fullmatch(r"\s*([0-9]+) bytes\s*", rest)
+        if sep and match:
+            rows[key.strip().lower()] = int(match.group(1))
+    return rows
+
+
 def volume_name(name: str) -> str:
     """The disk volume of a VM: ``<NAME>_vda.qcow2``.
 
@@ -208,6 +219,56 @@ def volume_name(name: str) -> str:
     ``vm-list`` (pool-membership test) and torn down by it in ``vm-destroy``.
     """
     return f"{name}_vda.qcow2"
+
+
+SNAPSHOT_SUFFIX = ".snapshot.qcow2"
+SNAPSHOT_META_SUFFIX = ".snapshot.json"
+#: Version of the sidecar document; a reader refuses any other value.
+SNAPSHOT_SCHEMA = 1
+
+
+def snapshot_volume(snap: str) -> str:
+    """The disk volume of a snapshot: ``<SNAP>.snapshot.qcow2``.
+
+    The suffix cannot collide with a VM's ``_vda.qcow2``/``-cloudinit.iso``, so
+    snapshots and VMs keep separate name spaces in the one pool.
+    """
+    return f"{snap}{SNAPSHOT_SUFFIX}"
+
+
+def snapshot_meta_volume(snap: str) -> str:
+    """The metadata sidecar of a snapshot: ``<SNAP>.snapshot.json`` (raw)."""
+    return f"{snap}{SNAPSHOT_META_SUFFIX}"
+
+
+def snapshot_volume_xml(name: str, capacity_bytes: int) -> str:
+    """``vol-create-from`` definition of a snapshot volume.
+
+    ``<compat>1.1</compat>`` is not optional: without it libvirt 10.0 writes a
+    qcow2 v2 image (``compat 0.10``). Mode ``0644`` keeps the base readable by
+    the hypervisor user and by ``qemu-img info`` without sudo.
+    """
+    vol = ET.Element("volume")
+    ET.SubElement(vol, "name").text = name
+    ET.SubElement(vol, "capacity", unit="bytes").text = str(capacity_bytes)
+    target = ET.SubElement(vol, "target")
+    ET.SubElement(target, "format", type="qcow2")
+    ET.SubElement(target, "compat").text = "1.1"
+    ET.SubElement(ET.SubElement(target, "permissions"), "mode").text = "0644"
+    return ET.tostring(vol, encoding="unicode")
+
+
+def backing_path_of(vol_xml: str) -> str | None:
+    """``<backingStore><path>`` of a ``virsh vol-dumpxml``, ``None`` if flat.
+
+    libvirt keeps reporting the path after the backing file is gone, which is
+    exactly what lets the dependents scan find orphaned overlays.
+    """
+    try:
+        root = ET.fromstring(vol_xml)
+    except ET.ParseError:
+        return None
+    return root.findtext("backingStore/path") or None
 
 
 def lease_file(command: str) -> str:
@@ -231,6 +292,69 @@ class TeardownResult:
     volume_already_absent: bool
     confirmation: str
     warning: str | None
+
+
+@dataclass(frozen=True)
+class SnapshotInfo:
+    """A snapshot's validated sidecar (schema v1, see the README).
+
+    The fields are the ones ``create --from-snapshot`` builds a clone from;
+    ``meta`` is the whole document, which ``snapshot show`` prints verbatim.
+    """
+
+    name: str
+    user: str
+    sudo_group: str
+    os_variant: str
+    distro: str | None
+    release: str | None
+    guest_hostname: str | None
+    virtual_gib: int
+    defaults: dict[str, int]
+    meta: dict[str, Any]
+
+
+#: Keys a schema-v1 sidecar must carry for a clone to be built from it.
+_SNAPSHOT_REQUIRED = ("name", "user", "sudo_group", "os_variant", "virtual_gib")
+
+
+def parse_snapshot_meta(text: str) -> SnapshotInfo:
+    """Parse and validate a sidecar document.
+
+    Raises:
+        VirtError: ``snapshot-incomplete`` for bad JSON, a schema other than
+            :data:`SNAPSHOT_SCHEMA` or a missing required key.
+    """
+    try:
+        meta = json.loads(text)
+    except json.JSONDecodeError:
+        meta = None
+    problem = None
+    if not isinstance(meta, dict):
+        problem = "is not a JSON object"
+    elif meta.get("schema") != SNAPSHOT_SCHEMA:
+        problem = f"has schema {meta.get('schema')!r}, expected {SNAPSHOT_SCHEMA}"
+    else:
+        missing = [k for k in _SNAPSHOT_REQUIRED if not meta.get(k)]
+        if missing:
+            problem = f"lacks {', '.join(missing)}"
+    if problem:
+        raise VirtError(
+            f"snapshot metadata {problem} — delete and re-create the snapshot",
+            "snapshot-incomplete",
+        )
+    return SnapshotInfo(
+        name=meta["name"],
+        user=meta["user"],
+        sudo_group=meta["sudo_group"],
+        os_variant=meta["os_variant"],
+        distro=meta.get("distro"),
+        release=meta.get("release"),
+        guest_hostname=meta.get("guest_hostname"),
+        virtual_gib=int(meta["virtual_gib"]),
+        defaults=dict(meta.get("defaults") or {}),
+        meta=meta,
+    )
 
 
 @dataclass(frozen=True)
@@ -501,14 +625,19 @@ def script_command(script: Path) -> str:
     )
 
 
-def render_meta_data(id_val: str, name: str) -> str:
-    """Generate cloud-init meta-data YAML."""
+def render_meta_data(id_val: str, name: str, hostname: str | None = None) -> str:
+    """Generate cloud-init meta-data YAML.
+
+    *hostname* defaults to the VM name; a ``--keep-hostname`` clone passes the
+    hostname recorded when its snapshot was sealed.
+    """
+    host = hostname or name
     return (
         f"id: {id_val}\n"
-        f"local-hostname: {name}\n"
+        f"local-hostname: {host}\n"
         "hostnames:\n"
-        f"  local: {name}\n"
-        f"  host: {name}\n"
+        f"  local: {host}\n"
+        f"  host: {host}\n"
     )
 
 
@@ -2031,4 +2160,28 @@ case $fstype in
   *) echo "virt-runner: unsupported guest filesystem '$fstype' — grow it manually"; exit 0 ;;
 esac
 echo "virt-runner: guest filesystem grown"
+"""
+
+
+#: Turns a provisioned guest back into "next boot is a first boot" before its
+#: disk is copied into a snapshot: virt-runner's own ``cloud-init.disabled``
+#: marker would make every clone ignore its new seed, and a shared machine-id
+#: makes networkd send the same DHCP client-id from every clone. SSH host keys
+#: stay: cloud-init rotates them on the new instance, and deleting them here
+#: would leave a clone whose cloud-init failed unreachable. ``uname -n``, not
+#: ``hostname`` (Arch ships no such binary). The first stdout line is the guest
+#: hostname, recorded for ``--keep-hostname``.
+_SEAL_SCRIPT = r"""set -eu
+cloud-init status --wait >/dev/null 2>&1 || true
+uname -n
+rm -f /etc/cloud/cloud-init.disabled
+cloud-init clean --logs
+if [ -d /run/systemd/system ]; then
+  printf 'uninitialized\n' > /etc/machine-id
+else rm -f /etc/machine-id; fi
+[ -L /var/lib/dbus/machine-id ] || rm -f /var/lib/dbus/machine-id
+rm -f /var/lib/systemd/random-seed
+rm -f /var/lib/NetworkManager/*.lease /var/lib/dhcp/*.leases 2>/dev/null || true
+sed -i -E '/^mount[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+virtiofs[[:space:]]/d' /etc/fstab
+sync
 """

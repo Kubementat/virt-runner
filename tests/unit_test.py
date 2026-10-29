@@ -1,6 +1,7 @@
 """Pure-logic checks (no libvirt, no network). Run: uv run tests/unit_test.py"""
 
 import json
+import re
 import subprocess
 
 import virt_runner.cmd_list as cmd_list
@@ -1529,6 +1530,84 @@ def main() -> None:
         "/id",
     )
     assert (blank["vcpu"], blank["ram_gib"], blank["disk_gib"]) == (None, None, None)
+
+    # --- snapshots: pure helpers -------------------------------------------
+    # Without a hostname the meta-data stays byte-identical to what every VM
+    # created so far booted from (regression guard).
+    assert render_meta_data("i", "c1") == (
+        "id: i\nlocal-hostname: c1\nhostnames:\n  local: c1\n  host: c1\n"
+    )
+    kept = render_meta_data("i", "c1", hostname="src")
+    assert "local-hostname: src\n" in kept and "c1" not in kept, kept
+
+    seal = vz._SEAL_SCRIPT
+    for needle in (
+        "rm -f /etc/cloud/cloud-init.disabled",
+        "cloud-init clean --logs",
+        "> /etc/machine-id",
+        "virtiofs[[:space:]]/d' /etc/fstab",
+        "uname -n",
+    ):
+        assert needle in seal, needle
+    # Host keys are cloud-init's to rotate; Arch has no `hostname` binary.
+    assert "ssh_host_" not in seal
+    assert not re.search(r"(^|[\s;|&(])hostname\b", seal, re.MULTILINE), seal
+
+    assert vz.snapshot_volume("a.b") == "a.b.snapshot.qcow2"
+    assert vz.snapshot_meta_volume("a.b") == "a.b.snapshot.json"
+    for n in ("a", "a.b", "x.snapshot", "vm-1_x"):
+        for vol in (vz.volume_name(n), Virtualizer.cloud_init_iso_volume(n)):
+            assert not vol.endswith((vz.SNAPSHOT_SUFFIX, vz.SNAPSHOT_META_SUFFIX)), vol
+
+    import xml.etree.ElementTree as ET
+
+    vol = ET.fromstring(vz.snapshot_volume_xml("s.snapshot.qcow2", 8589934592))
+    assert vol.findtext("name") == "s.snapshot.qcow2"
+    assert vol.findtext("capacity") == "8589934592"
+    assert vol.find("capacity").get("unit") == "bytes"
+    assert vol.find("target/format").get("type") == "qcow2"
+    assert vol.findtext("target/compat") == "1.1"
+    assert vol.findtext("target/permissions/mode") == "0644"
+
+    overlay = (
+        "<volume><name>c_vda.qcow2</name><target><path>/p/c_vda.qcow2</path>"
+        "</target><backingStore><path>/p/s.snapshot.qcow2</path>"
+        "<format type='qcow2'/></backingStore></volume>"
+    )
+    assert vz.backing_path_of(overlay) == "/p/s.snapshot.qcow2"
+    assert vz.backing_path_of("<volume><name>x</name></volume>") is None
+    assert vz.backing_path_of("not xml <") is None
+
+    assert vz.parse_vol_info_bytes(
+        "Name:  x\nType:  file\nCapacity:  1073741824 bytes\nAllocation:  200704 bytes\n"
+    ) == {"capacity": 1073741824, "allocation": 200704}
+
+    good = {
+        "schema": 1,
+        "name": "s",
+        "user": "ubuntu",
+        "sudo_group": "sudo",
+        "os_variant": "ubuntu-lts-latest",
+        "distro": "ubuntu",
+        "guest_hostname": "src",
+        "virtual_gib": 8,
+        "defaults": {"ram_gib": 1, "vcpu": 1, "disk_gib": 8},
+    }
+    info = vz.parse_snapshot_meta(json.dumps(good))
+    assert (info.name, info.user, info.virtual_gib) == ("s", "ubuntu", 8), info
+    assert info.guest_hostname == "src" and info.defaults["vcpu"] == 1
+    for bad in (
+        json.dumps({k: v for k, v in good.items() if k != "name"}),
+        json.dumps({**good, "schema": 2}),
+        "{not json",
+        "[]",
+    ):
+        try:
+            vz.parse_snapshot_meta(bad)
+        except VirtError as exc:
+            assert exc.code == "snapshot-incomplete", exc.code
+        else:
+            raise AssertionError(f"accepted {bad!r}")
 
     print("unit checks ok")
 
