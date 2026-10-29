@@ -1983,6 +1983,77 @@ def main() -> None:
     code, body = snap_cli(SnapVz(), ["delete", "s", "--json"])
     assert body["error"]["code"] == "snapshot-not-found", body
 
+    # --- create --from-snapshot ---------------------------------------------
+    from virt_runner.cmd_create import _create_document
+
+    for argv in (
+        ["create", "x", "--from-snapshot", "s", "--image", "http://u", "--json"],
+        ["create", "x", "--from-snapshot", "s", "--distro", "arch", "--json"],
+        ["create", "x", "--from-snapshot", "s", "--keep-going", "--json"],
+        ["create", "x", "--keep-hostname", "--json"],
+        ["create", "x", "--from-snapshot", "1bad", "--json"],
+    ):
+        res = CliRunner().invoke(cli_main, argv)
+        assert res.exit_code == 2, (argv, res.output)
+        assert json.loads(res.stdout)["error"]["code"] == "usage", res.output
+    set_json_mode(False)
+
+    base = {
+        "name": "c1",
+        "created": True,
+        "booted": True,
+        "uuid": "u",
+        "domain_state": "running",
+        "distro": "ubuntu",
+        "release": "resolute",
+        "arch": "x86_64",
+        "ram_gib": 1,
+        "vcpu": 1,
+        "disk_gib": 8,
+        "mounts": [],
+        "mac": "52:54:00:00:00:01",
+        "ip": "192.168.122.7",
+        "user": "ubuntu",
+        "hostname": "c1",
+        "ssh_identity": "/id",
+        "scripts": [],
+    }
+    plain = _create_document(base)
+    # A normal create only gains vm.hostname, vm.snapshot and snapshot: null.
+    assert plain["snapshot"] is None and "image" not in plain, plain
+    assert plain["vm"]["snapshot"] is None and plain["vm"]["hostname"] == "c1"
+    assert plain["vm"]["dns_name"] == "c1.default"
+    old_vm_keys = {
+        "name", "uuid", "state", "distro", "release", "arch", "ram_gib", "vcpu",
+        "disk_gib", "mounts", "mac", "ip", "dns_name", "ssh_user", "ssh_command",
+        "console_command", "teardown_command", "autostart",
+    }  # fmt: skip
+    assert set(plain["vm"]) == old_vm_keys | {"hostname", "snapshot"}, plain["vm"]
+
+    snap_info = vz.parse_snapshot_meta(
+        json.dumps({**good, "source": {"name": "src"}, "created_at": "T"})
+    )
+    for keep in (False, True):
+        doc = _create_document(
+            {
+                **base,
+                "snapshot": snap_info,
+                "keep_hostname": keep,
+                "hostname": "src" if keep else "c1",
+            }
+        )
+        assert doc["image"] is None and doc["vm"]["snapshot"] == "s", doc
+        assert set(doc["vm"]) == set(plain["vm"]), doc["vm"]
+        assert doc["vm"]["dns_name"] == (None if keep else "c1.default"), doc["vm"]
+        assert doc["snapshot"] == {
+            "name": "s",
+            "volume": "s.snapshot.qcow2",
+            "source_vm": "src",
+            "created_at": "T",
+            "keep_hostname": keep,
+        }, doc["snapshot"]
+    assert list(doc) == ["booted", "vm", "image", "snapshot", "scripts"], list(doc)
+
     print("unit checks ok")
 
 
