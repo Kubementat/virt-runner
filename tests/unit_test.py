@@ -1609,6 +1609,168 @@ def main() -> None:
         else:
             raise AssertionError(f"accepted {bad!r}")
 
+    # --- snapshots: the virsh argv of every Virtualizer call (lesson 013) ---
+    calls = []
+    replies = {}  # argv prefix (tuple) -> CompletedProcess fields
+
+    def fake_spawn(cmd, **kw):
+        # vol-create-from reads a temp XML file: keep its text for the asserts.
+        if cmd[:2] == ["virsh", "vol-create-from"]:
+            calls.append((list(cmd), Path(cmd[3]).read_text()))
+        else:
+            calls.append((list(cmd), kw.get("input")))
+        for prefix, (rc, out, err) in replies.items():
+            if tuple(cmd[: len(prefix)]) == prefix:
+                return subprocess.CompletedProcess(cmd, rc, out, err)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    real_spawn = vz._spawn
+    vz._spawn = fake_spawn
+    try:
+        v = Virtualizer()
+        pool_table = (
+            " Name   Path\n------\n"
+            " a_vda.qcow2  /p/a_vda.qcow2\n"
+            " s.snapshot.qcow2  /p/s.snapshot.qcow2\n"
+            " s.snapshot.json  /p/s.snapshot.json\n"
+            " half.snapshot.qcow2  /p/half.snapshot.qcow2\n"
+        )
+        replies[("virsh", "vol-list")] = (0, pool_table, "")
+        replies[("virsh", "pool-dumpxml")] = (0, "<pool><path>/p</path></pool>", "")
+        replies[("virsh", "vol-dumpxml", "a_vda.qcow2")] = (
+            0,
+            "<volume><backingStore><path>/p/s.snapshot.qcow2</path></backingStore></volume>",
+            "",
+        )
+        assert v.snapshot_names() == ["half", "s"], v.snapshot_names()
+        assert v.snapshot_dependents("s") == ["a"]
+        assert v.snapshot_dependents("half") == []
+
+        for snap, code in (
+            ("nope", "snapshot-not-found"),
+            ("half", "snapshot-incomplete"),
+        ):
+            try:
+                v.read_snapshot_meta(snap)
+            except VirtError as exc:
+                assert exc.code == code, (snap, exc.code)
+            else:
+                raise AssertionError(snap)
+
+        calls.clear()
+        assert v.create_overlay_volume("c", 10, "s") == "c_vda.qcow2"
+        assert calls[0][0] == [
+            "virsh", "vol-create-as", "vm-pool", "c_vda.qcow2", "--capacity", "10G",
+            "--format", "qcow2", "--backing-vol", "s.snapshot.qcow2",
+            "--backing-vol-format", "qcow2",
+        ], calls  # fmt: skip
+
+        calls.clear()
+        replies[("virsh", "vol-info")] = (
+            0, "Capacity: 8589934592 bytes\nAllocation: 1 bytes\n", ""
+        )  # fmt: skip
+        v.copy_to_snapshot("src_vda.qcow2", "s2")
+        argv, xml_text = calls[-1]
+        assert argv[:3] == ["virsh", "vol-create-from", "vm-pool"], argv
+        assert argv[4:] == ["src_vda.qcow2", "--inputpool", "vm-pool"], argv
+        assert "<compat>1.1</compat>" in xml_text and "8589934592" in xml_text
+        assert calls[0][0] == [
+            "virsh", "vol-info", "--bytes", "--pool", "vm-pool", "src_vda.qcow2"
+        ]  # fmt: skip
+
+        # A failed copy removes the half volume — but never a snapshot that
+        # was already there under that name.
+        for err, deletes in (("boom", True), ("name 'x' already in use", False)):
+            calls.clear()
+            replies[("virsh", "vol-create-from")] = (1, "", err)
+            try:
+                v.copy_to_snapshot("src_vda.qcow2", "s2")
+            except VirtError as exc:
+                assert exc.code == "snapshot-copy-failed" and exc.stage == "copy"
+            else:
+                raise AssertionError("copy failure not raised")
+            deleted = [
+                c for c, _ in calls if c[:3] == ["virsh", "--quiet", "vol-delete"]
+            ]
+            assert bool(deleted) == deletes, (err, deleted)
+            if deletes:
+                assert deleted[0][3] == "s2.snapshot.qcow2", deleted
+        del replies[("virsh", "vol-create-from")]
+
+        calls.clear()
+        v.write_snapshot_meta("s2", {"schema": 1})
+        assert calls[0][0][:4] == [
+            "virsh",
+            "vol-create-as",
+            "vm-pool",
+            "s2.snapshot.json",
+        ]
+        assert calls[0][0][-2:] == ["--format", "raw"], calls[0]
+        assert calls[1][0][:5] == [
+            "virsh",
+            "vol-upload",
+            "--pool",
+            "vm-pool",
+            "s2.snapshot.json",
+        ]
+
+        calls.clear()
+        replies[("virsh", "vol-upload")] = (1, "", "denied")
+        try:
+            v.write_snapshot_meta("s2", {"schema": 1})
+        except VirtError as exc:
+            assert exc.code == "snapshot-metadata-failed", exc.code
+        else:
+            raise AssertionError("metadata failure not raised")
+        assert ["virsh", "--quiet", "vol-delete", "s2.snapshot.json", "vm-pool"] in [
+            c for c, _ in calls
+        ]
+        del replies[("virsh", "vol-upload")]
+
+        calls.clear()
+        replies[("virsh", "vol-delete", "s.snapshot.json")] = (
+            1, "", "error: Storage volume not found: no storage vol"
+        )  # fmt: skip
+        assert v.delete_snapshot("s") == [
+            {"name": "s.snapshot.qcow2", "deleted": True, "already_absent": False},
+            {"name": "s.snapshot.json", "deleted": False, "already_absent": True},
+        ]
+
+        # The seal goes through `sudo -n bash -s` with the script on stdin.
+        calls.clear()
+        replies[("ssh",)] = (0, "src-host\n", "")
+        assert v.seal_guest("ubuntu", "10.0.0.5", "/id") == "src-host"
+        argv, stdin = calls[0]
+        assert argv[-4:] == ["sudo", "-n", "bash", "-s"], argv
+        assert "ubuntu@10.0.0.5" in argv and stdin == vz._SEAL_SCRIPT
+        replies[("ssh",)] = (127, "", "uname: not found")
+        try:
+            v.seal_guest("ubuntu", "10.0.0.5", "/id")
+        except VirtError as exc:
+            assert (exc.code, exc.stage) == ("snapshot-seal-failed", "seal")
+        else:
+            raise AssertionError("seal failure not raised")
+
+        # No power-off fallback: a guest that stays up is a timeout, not a destroy.
+        calls.clear()
+        replies[("virsh", "domstate")] = (0, "running\n", "")
+        v.POLL_INTERVAL_S = 0
+        try:
+            v.shutdown_and_wait("src", 0)
+        except VirtError as exc:
+            assert (exc.code, exc.stage) == ("vm-shutdown-timeout", "shutdown")
+        else:
+            raise AssertionError("shutdown timeout not raised")
+        assert ["virsh", "shutdown", "src"] in [c for c, _ in calls]
+        assert not [c for c, _ in calls if "destroy" in c], calls
+
+        calls.clear()
+        v.set_domain_metadata("c", "ubuntu", "u", "/id", release="r", snapshot=None)
+        meta_xml = calls[0][0][-1]
+        assert 'release="r"' in meta_xml and "snapshot" not in meta_xml, meta_xml
+    finally:
+        vz._spawn = real_spawn
+
     print("unit checks ok")
 
 
