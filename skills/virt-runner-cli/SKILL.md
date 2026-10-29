@@ -1,7 +1,7 @@
 ---
 name: virt-runner-cli
 description: |
-  Expert use of the `virt-runner` CLI: one command to a running, SSH-reachable Ubuntu, Arch or Fedora KVM guest via libvirt (qemu:///system) + cloud-init, with `create`, `destroy`, `list`, `modify` and `ssh` subcommands (short aliases `c`, `d`, `ls`, `m`, `s`), a `setup` subcommand for host prerequisites, and a stable `--json` contract for the VM commands. Use when the user mentions virt-runner, wants to create, provision, list, resize, change the networking of, SSH into or destroy throwaway/test KVM or libvirt VMs, spin up a clean Ubuntu/Arch/Fedora VM to test something, share host directories into a VM (virtiofs `--mount`), provision a VM with setup scripts (`--script`), grow a VM's disk or change its vCPU/RAM/NICs/MAC, run a multi-distro test matrix, script VM lifecycles with JSON/jq, or debug a failed VM create (lease/SSH timeouts, image download/verification, script failures).
+  Expert use of the `virt-runner` CLI: one command to a running, SSH-reachable Ubuntu, Arch or Fedora KVM guest via libvirt (qemu:///system) + cloud-init, with `create`, `destroy`, `list`, `modify`, `ssh` and `snapshot` subcommands (short aliases `c`, `d`, `ls`, `m`, `s`, `snap`), a `setup` subcommand for host prerequisites, and a stable `--json` contract for the VM commands. Use when the user mentions virt-runner, wants to create, provision, list, resize, change the networking of, SSH into or destroy throwaway/test KVM or libvirt VMs, spin up a clean Ubuntu/Arch/Fedora VM to test something, share host directories into a VM (virtiofs `--mount`), provision a VM with setup scripts (`--script`), grow a VM's disk or change its vCPU/RAM/NICs/MAC, snapshot a provisioned VM and start fast clones from it (`snapshot create`, `create --from-snapshot`), run a multi-distro test matrix, script VM lifecycles with JSON/jq, or debug a failed VM create (lease/SSH timeouts, image download/verification, script failures).
 compatibility: Requires a KVM host (x86_64 or aarch64) with libvirt, virt-install >= 4.1 and Python >= 3.10. Run as `virt-runner ...` when installed (`uv tool install virt-runner`), or `uv run virt-runner ...` from a checkout.
 ---
 
@@ -70,7 +70,7 @@ Quick manual fixes: `virsh pool-start vm-pool && virsh net-start default`.
 ## Commands
 
 Short aliases work everywhere: `c` = `create`, `d` = `destroy`, `ls` = `list`, `m` = `modify`,
-`s` = `ssh`. Identical behaviour, flags and exit codes; the JSON `tool` id stays canonical (`vm-create`,
+`s` = `ssh`, `snap` = `snapshot`. Identical behaviour, flags and exit codes; the JSON `tool` id stays canonical (`vm-create`,
 not `vm-c`). Use the full names in anything you write to disk so the command stays greppable.
 
 ### create NAME
@@ -218,6 +218,34 @@ from inside the guest, the `--mac` lease change) against a VM it creates itself,
 PASS/FAIL per check; `RUN_DHCP_RISK=1` adds the stage that puts a second NIC on a DHCP network
 and can cut its own SSH. Prefer it over improvising when the question is "does networking still
 work".
+
+### snapshot create|list|show|delete, create --from-snapshot
+
+```bash
+virt-runner snapshot create VM SNAP [--start-source] [--shutdown-timeout 300] --json
+virt-runner create NAME --from-snapshot SNAP [--keep-hostname] [--ram/--vcpu/--disk/--mount/--script] --json
+virt-runner snapshot list --json            # sizes + clones per snapshot
+virt-runner snapshot show SNAP --json       # full metadata
+virt-runner snapshot delete SNAP --json     # snapshot-in-use while clones exist
+```
+
+- `snapshot create` seals the guest over SSH (cloud-init clean, machine-id reset, virtiofs fstab
+  lines removed), shuts it down (never forced; `vm-shutdown-timeout` after 300 s) and copies the
+  disk to `SNAP.snapshot.qcow2` in `vm-pool`. **The source is left sealed and shut off**
+  (`source.state`); restarting it re-runs first-boot setup and gives it new SSH host keys. Tell
+  the user before snapshotting a VM they still use.
+- A clone is a thin overlay on the snapshot with a new name, MAC, IP, machine-id and host keys;
+  it boots to SSH in ~15 s. Its document is a normal `vm-create` document with `image: null`,
+  `vm.snapshot` and a top-level `snapshot`. `--ram/--vcpu/--disk` default to the snapshot's
+  values; `--disk` may only grow. `--distro/--release/--image/--user/--keep-going` are usage
+  errors. Clones mount only their own `--mount` shares.
+- `--keep-hostname` keeps the snapshot's guest hostname (k3s node names, hostname-bound apps);
+  `vm.dns_name` is then `null` — use `vm.ip`.
+- Never delete a snapshot volume with `virsh vol-delete`: libvirt does not refuse, and every clone
+  on it breaks. Destroy the clones, then `snapshot delete`.
+- Stages of `snapshot create`: `preflight` → `seal` → `shutdown` → `copy` → `metadata` →
+  `restart` (only with `--start-source`, failures there are warnings). `create --from-snapshot`
+  has stage `snapshot` in place of `image`.
 
 ### setup
 

@@ -7,7 +7,30 @@ Entries are derived from the actual git history (commits `c35c32b` → v0.1.0).
 
 ## [Unreleased]
 
-_No unreleased changes at present._
+### Added
+
+- **Snapshots and clones.** `virt-runner snapshot create VM SNAP` seals a VM in the guest
+  (cloud-init clean, machine-id reset, virt-runner's virtiofs fstab lines removed), shuts it down
+  without ever forcing a power-off (`--shutdown-timeout`, default 300 s) and copies its disk into
+  `vm-pool` as a flat, standalone `<SNAP>.snapshot.qcow2` plus a schema-v1 metadata volume
+  `<SNAP>.snapshot.json`. The source stays sealed and shut off (`--start-source` restarts it; it
+  re-runs first-boot setup and gets new SSH host keys), which the text output, the document
+  (`source.sealed`, `source.state`) and the README all say. `snapshot list`, `snapshot show` and
+  `snapshot delete` manage them; `delete` refuses with `snapshot-in-use` while clone disks are
+  backed by the snapshot. Alias: `snap`.
+- **`create NAME --from-snapshot SNAP [--keep-hostname]`.** A clone is a thin qcow2 overlay on
+  the snapshot with a new name, MAC, IP, machine-id and SSH host keys, SSH-ready in ~15 s; any
+  number run at once. `--ram/--vcpu/--disk` default to the snapshot's values (`--disk` grows
+  only), and a clone mounts only its own `--mount` shares. `--keep-hostname` keeps the sealed
+  guest hostname (k3s node names) and reports `vm.dns_name: null`.
+- The `vm-create` document gains `vm.hostname`, `vm.snapshot` and a top-level `snapshot`
+  (all `null`/the VM name on a normal create); a clone reports `image: null`. `vm-list` reports
+  `snapshot` per VM. New error codes: `snapshot-already-exists`, `snapshot-not-found`,
+  `snapshot-incomplete`, `snapshot-seal-failed`, `vm-shutdown-timeout`, `snapshot-copy-failed`,
+  `snapshot-metadata-failed`, `snapshot-in-use`, `overlay-create-failed`; new stages `snapshot`
+  (create) and `seal`/`shutdown`/`copy`/`metadata`/`restart` (snapshot create).
+- `create` records `release`, `image_url` and `mounts` in the domain metadata, so a later
+  snapshot knows where the VM came from.
 
 ## [0.7.0] - 2026-10-26
 

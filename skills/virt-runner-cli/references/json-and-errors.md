@@ -38,7 +38,9 @@ Source of truth: `README.md` ("JSON output"), `src/virt_runner/output.py`, `cmd_
     "ssh_command": "ssh -i /home/u/.ssh/virt_runner_key ubuntu@192.168.122.57",
     "console_command": "virsh console dev",
     "teardown_command": "virt-runner destroy dev",
-    "autostart": true
+    "autostart": true,
+    "hostname": "dev",
+    "snapshot": null
   },
   "image": {
     "source_url": "https://cloud-images.ubuntu.com/resolute/current/…img",
@@ -46,9 +48,14 @@ Source of truth: `README.md` ("JSON output"), `src/virt_runner/output.py`, `cmd_
     "cache_hit": true, "downloaded": false,
     "verification": "sha256-sums | skipped", "verified": true
   },
+  "snapshot": null,
   "scripts": [{"path": "/abs/setup.sh", "exit_code": 0}]
 }
 ```
+
+With `--from-snapshot SNAP`: `image` is `null`, `vm.snapshot` is `"SNAP"` and the top-level
+`snapshot` is `{name, volume, source_vm, created_at, keep_hostname}`. With `--keep-hostname`,
+`vm.hostname` is the snapshot's guest hostname and `vm.dns_name` is `null`.
 
 - `booted` is always present (false on `--no-boot` and early failures).
 - `vm` appears once the domain exists; `image` once the image stage finished; `scripts` always
@@ -66,6 +73,48 @@ Presence of `vm` in an error document ⇒ the domain exists ⇒ you must `destro
 | `wait-ip` | `lease-timeout` | **yes** |
 | `ssh-verify` | `ssh-timeout` | **yes** |
 | `script` | `script-failed` | **yes, running** |
+| `snapshot` (only `--from-snapshot`, replaces `image`) | `snapshot-not-found` / `snapshot-incomplete` / `disk-shrink-unsupported` | no |
+
+`create --from-snapshot` fails in `create` with `overlay-create-failed` when the overlay disk
+cannot be made (no VM left).
+
+## snapshot create (`vm-snapshot-create`)
+
+```json
+{
+  "tool": "vm-snapshot-create", "status": "success", "error": null,
+  "snapshot": {"name": "golden", "pool": "vm-pool", "volume": "golden.snapshot.qcow2",
+               "path": "/var/lib/libvirt/images/vms/golden.snapshot.qcow2",
+               "virtual_gib": 30, "allocated_gib": 2.12, "created_at": "2026-10-28T21:14:03Z"},
+  "source": {"name": "dev", "uuid": "…", "was_running": true, "started_for_seal": false,
+             "sealed": true, "state": "shut off"},
+  "timings_s": {"seal": 0.9, "shutdown": 3.1, "copy": 1.5},
+  "warnings": []
+}
+```
+
+`snapshot` is `null` until the snapshot exists; `source` is present once the VM was found.
+
+| Stage | Code | State afterwards |
+|---|---|---|
+| `preflight` | `vm-not-defined`, `not-a-virt-runner-vm`, `snapshot-already-exists`, `pool-*` | nothing changed |
+| `seal` | `snapshot-seal-failed`, `lease-timeout`, `ssh-timeout` | source running, possibly half-sealed: re-run or destroy it |
+| `shutdown` | `vm-shutdown-timeout` | source running and sealed; stop its workload, re-run with a larger `--shutdown-timeout` |
+| `copy` | `snapshot-copy-failed` | source shut off; no snapshot volume |
+| `metadata` | `snapshot-metadata-failed` | source shut off; no snapshot volume |
+| `restart` | (warning only) | snapshot exists; `virsh start VM` |
+
+## snapshot list / show / delete
+
+- `vm-snapshot-list`: `{pool, count, snapshots: [{name, created_at, source_vm, distro, release,
+  arch, virtual_gib, allocated_gib, clones}]}`. Incomplete snapshots: `{name, metadata: null,
+  state: "incomplete", virtual_gib, allocated_gib, clones}` — delete them.
+- `vm-snapshot-show`: `{snapshot: {<schema-1 metadata>, volume, path, allocated_gib, clones}}`.
+  The metadata carries `user`, `guest_hostname`, `defaults {ram_gib, vcpu, disk_gib}`,
+  `source {name, uuid, mac}`, `mounts` (informational) and `parent {image_url, snapshot}`.
+- `vm-snapshot-delete`: `{name, volumes: [{name, deleted, already_absent}], warnings}`; refused
+  with `snapshot-in-use` (exit 1, `clones: [...]` in the document) while any clone disk is backed
+  by it.
 
 ## list (`vm-list`)
 
@@ -215,3 +264,12 @@ through a non-zero ssh exit code.
 | `ssh-timeout` | SSH round-trip failed for 90 s | `virsh console NAME`; check cloud-init; right key/user; destroy afterwards |
 | `virtiofsd-missing` | `--mount` but no `/usr/libexec/virtiofsd` | `sudo apt install virtiofsd` (or `virt-runner setup`) |
 | `script-failed` | A `--script` exited non-zero (VM kept) | `virt-runner ssh NAME`, fix and re-run, or destroy |
+| `snapshot-already-exists` | `snapshot create` with a name already in use | Pick another name, or `snapshot delete` the old one if it is yours |
+| `snapshot-not-found` | No such snapshot | `virt-runner snapshot list` |
+| `snapshot-incomplete` | Disk or metadata volume missing / invalid | `virt-runner snapshot delete SNAP` and re-create it |
+| `snapshot-seal-failed` | The in-guest seal script failed (VM kept running) | Read the message (it quotes the guest output); re-run, or destroy the VM |
+| `vm-shutdown-timeout` | Guest did not power off in `--shutdown-timeout` (no forced power-off) | Stop the workload (`virt-runner ssh`), re-run with a larger timeout |
+| `snapshot-copy-failed` | `virsh vol-create-from` failed | Pool space: `virsh pool-info vm-pool` |
+| `snapshot-metadata-failed` | Writing the sidecar volume failed (copy removed) | Pool space / permissions; re-run |
+| `snapshot-in-use` | `snapshot delete` while clones are backed by it | Destroy the listed clones first — never `virsh vol-delete` the snapshot |
+| `overlay-create-failed` | Clone overlay could not be created | Pool space; `virsh vol-info --pool vm-pool SNAP.snapshot.qcow2` |

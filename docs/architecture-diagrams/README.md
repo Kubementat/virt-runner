@@ -15,6 +15,7 @@ flowchart TB
         CD["cmd_destroy"]
         CL["cmd_list"]
         CS["cmd_ssh"]
+        CSN["cmd_snapshot<br/>click.group: create/list/show/delete"]
     end
 
     subgraph CORE["Core (no click beyond decoration)"]
@@ -36,8 +37,8 @@ flowchart TB
         T5["dnsmasq lease file (virbr0.status)"]
     end
 
-    MAIN --> CC & CD & CL & CS
-    CC & CD & CL & CS -. "built via @command() (cls=JsonCommand)" .-> JC
+    MAIN --> CC & CD & CL & CS & CSN
+    CC & CD & CL & CS & CSN -. "built via @command() (cls=JsonCommand)" .-> JC
     CC --> V & IMG & PROF
     CD --> V
     CL --> V
@@ -358,3 +359,33 @@ sequenceDiagram
         OUT-->>User: one JSON error document (+ partial sections), exit 1
     end
 ```
+
+### 3.6 `snapshot create` and `create --from-snapshot`
+
+```mermaid
+flowchart TD
+    A["virt-runner snapshot create VM SNAP"] --> P["stage := preflight<br/>preflight_check · VM defined + owned · SNAP not in snapshot_names()"]
+    P --> S0{"VM running?"}
+    S0 -->|no| S1["start_domain (source.started_for_seal)"]
+    S0 -->|yes| S2
+    S1 --> S2["stage := seal<br/>wait_for_ip → verify_ssh_reachable →<br/>seal_guest: ssh sudo -n bash -s < _SEAL_SCRIPT<br/>(rm cloud-init.disabled, cloud-init clean, machine-id reset,<br/>strip mountN virtiofs fstab lines; prints uname -n)"]
+    S2 --> D["stage := shutdown<br/>virsh shutdown + poll, --shutdown-timeout (300 s)<br/>no destroy fallback → vm-shutdown-timeout"]
+    D --> C["stage := copy<br/>vol-create-from vm-pool XML(compat 1.1, 0644) SRC_vda.qcow2<br/>(qemu-img convert: flat, standalone)"]
+    C --> M["stage := metadata<br/>sidecar SNAP.snapshot.json: vol-create-as raw + vol-upload<br/>failure → delete SNAP.snapshot.qcow2"]
+    M --> R{"--start-source?"}
+    R -->|yes| R1["stage := restart: virsh start (failure = warning)"]
+    R -->|no| E["source stays sealed + shut off"]
+    R1 --> E2["document: snapshot, source, timings_s, warnings"]
+    E --> E2
+
+    B["virt-runner create NAME --from-snapshot SNAP"] --> B1["usage: no --distro/--release/--image/--user/--keep-going"]
+    B1 --> B2["stage := preflight (as create)"]
+    B2 --> B3["stage := snapshot<br/>read_snapshot_meta (vol-download + parse_snapshot_meta)<br/>--ram/--vcpu/--disk from defaults; --disk below → disk-shrink-unsupported"]
+    B3 --> B4["stage := cloud-init<br/>new uuid4 instance-id; hostname = NAME or guest_hostname (--keep-hostname)"]
+    B4 --> B5["stage := create<br/>create_overlay_volume: vol-create-as --backing-vol SNAP.snapshot.qcow2<br/>→ create_vm (virt-install, new MAC) → metadata snapshot=SNAP"]
+    B5 --> B6["wait-ip → ssh-verify → script (shared _boot)"]
+```
+
+`snapshot delete` scans every pool volume's `vol-dumpxml` `<backingStore><path>`
+(`backing_users`) and refuses with `snapshot-in-use` while any volume is layered on
+the snapshot — libvirt itself deletes a backing file under a running clone.
