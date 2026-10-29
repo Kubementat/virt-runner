@@ -4,7 +4,8 @@ Run with: uv run tests/integration_test.py
 
 Flow: create 2 Ubuntu VMs (with passing / failing --script) + 1 Arch VM + 1 Fedora VM -> list -> ssh hello world
 + shared-dir read/write in each -> ssh <name> session in each -> destroy all
--> list (expect 0).
+-> list (expect 0). Then the snapshot leg: snapshot an Ubuntu VM, destroy it,
+start three clones from the snapshot, delete the snapshot once they are gone.
 
 The Arch leg is x86_64-only (arch-boxes ships no aarch64 image): on aarch64
 hosts it is skipped and the Ubuntu + Fedora legs are the real aarch64 e2e.
@@ -30,6 +31,13 @@ FEDORA_NAME = "it-vm-fedora"
 # arch-boxes ships x86_64 images only: skip the arch leg elsewhere.
 RUN_ARCH = Virtualizer.host_arch() == "x86_64"
 ALL = NAMES + ([ARCH_NAME] if RUN_ARCH else []) + [FEDORA_NAME]
+# The snapshot leg's VMs live and die inside that leg, so they are not part of
+# ALL's list/destroy checks — only of the best-effort cleanup.
+SNAP = "it-snap"
+SNAP_SRC = "it-snap-src"
+CLONES = ["it-clone-a", "it-clone-b"]
+CLONE_KEEP = "it-clone-k"
+SNAP_VMS = [SNAP_SRC, *CLONES, CLONE_KEEP]
 
 
 def virt_runner(*args: str, allow_fail: bool = False) -> tuple[dict, int]:
@@ -111,8 +119,9 @@ def main() -> None:
     # Best-effort cleanup of leftovers from a previous interrupted run.
     # Still --json: even the "vm-not-defined" error path must carry an
     # envelope on stdout.
-    for name in ALL:
+    for name in ALL + SNAP_VMS:
         virt_runner("destroy", name, allow_fail=True)
+    virt_runner("snapshot", "delete", SNAP, allow_fail=True)
 
     # 0. --version works without libvirt.
     proc = subprocess.run(
@@ -706,12 +715,162 @@ def main() -> None:
         doc, _ = virt_runner("list")
         left = [vm["name"] for vm in doc["vms"] if vm["name"] in ALL]
         check(not left, f"no test VMs left after teardown, got {left}")
+
+        # 6. Snapshots and clones.
+        snapshot_leg(scripts)
     finally:
         # A failed run must not leak VMs (check() exits, finally still runs).
-        for name in ALL:
+        for name in ALL + SNAP_VMS:
             virt_runner("destroy", name, allow_fail=True)
+        virt_runner("snapshot", "delete", SNAP, allow_fail=True)
         shutil.rmtree(share, ignore_errors=True)
         shutil.rmtree(scripts, ignore_errors=True)
+
+
+def snapshot_leg(scripts: Path) -> None:
+    """Snapshot a VM, outlive it, and run three clones of it at once."""
+    share_a = Path(tempfile.mkdtemp(prefix="virt-runner-it-a-"))
+    share_b = Path(tempfile.mkdtemp(prefix="virt-runner-it-b-"))
+    (share_b / "b.txt").write_text("from-b\n")
+    (scripts / "mark.sh").write_text("echo snapped > ~/marker\n")
+    sizing = ["--ram", "1", "--vcpu", "1", "--disk", "8"]
+    try:
+        # 1-3. The snapshot outlives its source, which is left shut off.
+        virt_runner(
+            "create", *sizing, "--mount", f"{share_a}:/mnt/a",
+            "--script", str(scripts / "mark.sh"), SNAP_SRC,
+        )  # fmt: skip
+        doc, _ = virt_runner("snapshot", "create", SNAP_SRC, SNAP)
+        check(
+            doc["source"]["state"] == "shut off" and doc["source"]["sealed"],
+            f"snapshot create leaves the source sealed and shut off, got {doc['source']}",
+        )
+        check(
+            doc["snapshot"]["volume"] == f"{SNAP}.snapshot.qcow2"
+            and doc["snapshot"]["virtual_gib"] == 8,
+            f"snapshot create reports the volume, got {doc['snapshot']}",
+        )
+        virt_runner("destroy", SNAP_SRC)
+        doc, _ = virt_runner("snapshot", "show", SNAP)
+        check(
+            doc["snapshot"]["source"]["name"] == SNAP_SRC,
+            "the snapshot outlives its destroyed source",
+        )
+
+        # 4. Two clones, each with its own identity; only the clone's own
+        # --mount is mounted, never the source's.
+        clones = {}
+        for name in CLONES:
+            mount = ["--mount", f"{share_b}:/mnt/b"] if name == CLONES[0] else []
+            doc, _ = virt_runner("create", name, "--from-snapshot", SNAP, *mount)
+            check(
+                doc["status"] == "success"
+                and doc["image"] is None
+                and doc["vm"]["snapshot"] == SNAP
+                and doc["vm"]["dns_name"] == f"{name}.default",
+                f"create {name} --from-snapshot succeeded",
+            )
+            clones[name] = doc["vm"]
+        a, b = (clones[n] for n in CLONES)
+        check(a["ip"] != b["ip"] and a["mac"] != b["mac"], "clones get distinct IP/MAC")
+        probe = (
+            "cat ~/marker; cat /etc/machine-id; hostname; "
+            "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub | cut -d' ' -f2; "
+            "test -f /etc/cloud/cloud-init.disabled && echo disabled"
+        )
+        facts = {
+            n: ssh_run(vm["ssh_command"], probe).split() for n, vm in clones.items()
+        }
+        for name, (marker, _mid, host, _key, disabled) in facts.items():
+            check(marker == "snapped", f"{name} has the source's disk contents")
+            check(host == name, f"{name}'s hostname is its own name, got {host}")
+            check(disabled == "disabled", f"{name} disabled cloud-init again")
+        check(
+            facts[CLONES[0]][1] != facts[CLONES[1]][1],
+            "clones get distinct machine-ids",
+        )
+        check(
+            facts[CLONES[0]][3] != facts[CLONES[1]][3], "clones get distinct host keys"
+        )
+        mounted = ssh_run(
+            a["ssh_command"], "findmnt -rn -t virtiofs -o TARGET || true"
+        ).split()
+        check(
+            mounted == ["/mnt/b"],
+            f"{CLONES[0]} mounts only its own share, got {mounted}",
+        )
+        check(
+            ssh_run(a["ssh_command"], "cat /mnt/b/b.txt").strip() == "from-b",
+            f"{CLONES[0]} reads its own share",
+        )
+        mounted = ssh_run(
+            b["ssh_command"], "findmnt -rn -t virtiofs -o TARGET || true"
+        ).split()
+        check(mounted == [], f"{CLONES[1]} mounts nothing, got {mounted}")
+
+        # 5. --keep-hostname keeps the sealed hostname and grows the disk.
+        doc, _ = virt_runner(
+            "create", CLONE_KEEP, "--from-snapshot", SNAP, "--keep-hostname", "--disk", "10"
+        )  # fmt: skip
+        k = doc["vm"]
+        check(
+            k["dns_name"] is None and k["hostname"] == SNAP_SRC,
+            "kept hostname, dns_name null",
+        )
+        host, root = ssh_run(
+            k["ssh_command"], "hostname; df -B1 / | awk 'NR==2 {print $2}'"
+        ).split()
+        check(host == SNAP_SRC, f"{CLONE_KEEP} keeps hostname {SNAP_SRC}, got {host}")
+        check(
+            int(root) > 8 * 1024**3,
+            f"{CLONE_KEEP}'s root grew past the 8 GiB snapshot, got {root}",
+        )
+
+        # 6. In use: listed with its clones, delete refused.
+        doc, _ = virt_runner("snapshot", "list")
+        entry = [e for e in doc["snapshots"] if e["name"] == SNAP]
+        check(
+            len(entry) == 1
+            and sorted(entry[0]["clones"]) == sorted([*CLONES, CLONE_KEEP]),
+            f"snapshot list reports the three clones, got {entry}",
+        )
+        doc, rc = virt_runner("snapshot", "delete", SNAP, allow_fail=True)
+        check(
+            rc == 1 and doc["error"]["code"] == "snapshot-in-use",
+            f"delete of a snapshot in use is refused, got {doc['error']}",
+        )
+
+        # 7. Once the clones are gone the snapshot can go, and nothing is left.
+        for name in [*CLONES, CLONE_KEEP]:
+            virt_runner("destroy", name)
+        doc, _ = virt_runner("snapshot", "delete", SNAP)
+        check(doc["status"] == "success", "snapshot delete succeeded")
+        doc, _ = virt_runner("snapshot", "list")
+        check(
+            all(e["name"] != SNAP for e in doc["snapshots"]),
+            "snapshot list no longer shows it",
+        )
+        vols = subprocess.run(
+            ["virsh", "vol-list", Virtualizer.POOL],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout
+        check(f"{SNAP}.snapshot" not in vols, "no snapshot volumes left in the pool")
+
+        # 8. Unknown snapshot: its own code, at stage snapshot.
+        doc, rc = virt_runner(
+            "create", "it-x", "--from-snapshot", "nope", allow_fail=True
+        )
+        check(
+            rc == 1
+            and doc["error"]["code"] == "snapshot-not-found"
+            and doc["error"]["stage"] == "snapshot",
+            f"--from-snapshot of a missing snapshot is snapshot-not-found, got {doc['error']}",
+        )
+    finally:
+        shutil.rmtree(share_a, ignore_errors=True)
+        shutil.rmtree(share_b, ignore_errors=True)
 
 
 if __name__ == "__main__":
