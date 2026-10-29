@@ -200,6 +200,137 @@ def modify_cli(fake, argv):
     return res.exit_code, body
 
 
+class SnapVz:
+    """A `Virtualizer` for the `snapshot` commands: records calls, fails on demand.
+
+    *fail* names the one method that raises (with the code it would raise);
+    *clones* are the dependents the scan reports.
+    """
+
+    POOL = "vm-pool"
+    DEFAULT_USER = "ubuntu"
+    DEFAULT_SSH_KEY = "/tmp/vr-test/id_ed25519.pub"
+
+    _CODES = {
+        "seal_guest": ("snapshot-seal-failed", "seal"),
+        "copy_to_snapshot": ("snapshot-copy-failed", "copy"),
+        "write_snapshot_meta": ("snapshot-metadata-failed", "metadata"),
+    }
+
+    def __init__(self, *, fail=None, clones=(), snapshots=(), running=True):
+        self.fail = fail
+        self.clones = list(clones)
+        self.snapshots = list(snapshots)
+        self.state = "running" if running else "shut off"
+        self.calls = []
+
+    def _maybe_fail(self, method):
+        self.calls.append(method)
+        if self.fail == method:
+            code, stage = self._CODES[method]
+            raise VirtError(f"{method} failed", code, stage)
+
+    @staticmethod
+    def private_key_path(pub_path):
+        return pub_path.removesuffix(".pub")
+
+    @staticmethod
+    def host_arch():
+        return "x86_64"
+
+    @staticmethod
+    def _mac_of(root):
+        return "52:54:00:aa:bb:cc"
+
+    def preflight_check(self):
+        pass
+
+    require_libvirt = require_pool_defined = preflight_check
+
+    def domain_exists(self, name):
+        return name != "ghost"
+
+    def owns_domain(self, name):
+        return True
+
+    def disk_volume(self, name):
+        return f"{name}_vda.qcow2"
+
+    def snapshot_names(self):
+        return self.snapshots
+
+    def domain_meta(self, name):
+        return {"distro": "ubuntu", "user": "ci", "identity": "/id", "release": "r"}
+
+    def domain_xml_text(self, name):
+        import xml.etree.ElementTree as ET
+
+        return ET.fromstring(VM_XML), VM_XML
+
+    def get_domain_state(self, name):
+        return self.state
+
+    def start_domain(self, name):
+        self.calls.append("start_domain")
+        self.state = "running"
+
+    def wait_for_ip(self, name, mac, lease_file, timeout_s=120):
+        return "192.168.122.9"
+
+    def verify_ssh_reachable(self, name, user, ip, identity=None):
+        pass
+
+    def seal_guest(self, user, ip, identity=None):
+        self._maybe_fail("seal_guest")
+        return "src-host"
+
+    def shutdown_and_wait(self, name, timeout_s):
+        self.calls.append("shutdown_and_wait")
+        self.state = "shut off"
+
+    def copy_to_snapshot(self, src_volume, snap):
+        self._maybe_fail("copy_to_snapshot")
+
+    def write_snapshot_meta(self, snap, meta):
+        self.meta = meta
+        self._maybe_fail("write_snapshot_meta")
+
+    def delete_volume_quiet(self, volume):
+        self.calls.append(("delete_volume_quiet", volume))
+
+    def volume_bytes(self, volume):
+        return {"capacity": 8 * 1024**3, "allocation": 2 * 1024**3}
+
+    def snapshot_path(self, snap):
+        return f"/p/{snap}.snapshot.qcow2"
+
+    def snapshot_dependents(self, snap, users=None):
+        return self.clones
+
+    def delete_snapshot(self, snap):
+        self.calls.append("delete_snapshot")
+        return []
+
+
+def snap_cli(fake, argv):
+    """Run `virt-runner snapshot …` against *fake*: (exit, parsed JSON)."""
+    from click.testing import CliRunner
+
+    import virt_runner.cmd_snapshot as cs
+    from virt_runner.cli import main as cli_main
+    from virt_runner.output import set_json_mode
+
+    real = cs.Virtualizer
+    cs.Virtualizer = lambda: fake
+    try:
+        res = CliRunner().invoke(cli_main, ["snapshot", *argv])
+    finally:
+        cs.Virtualizer = real
+        set_json_mode(False)
+    body = json.loads(res.stdout) if res.stdout.strip() else {}
+    return res.exit_code, body
+
+
 def main() -> None:
     # 1.1 — Fedora sums_url resolves the compose name, not the image name.
     # One regex covers both arch tokens.
@@ -1469,6 +1600,7 @@ def main() -> None:
         "ls": "list",
         "s": "ssh",
         "m": "modify",
+        "snap": "snapshot",
     }
     for alias, canonical in ALIASES.items():
         assert cli_main.get_command(None, alias) is cli_main.get_command(
@@ -1770,6 +1902,86 @@ def main() -> None:
         assert 'release="r"' in meta_xml and "snapshot" not in meta_xml, meta_xml
     finally:
         vz._spawn = real_spawn
+
+    # --- snapshot create / delete flows ------------------------------------
+    fake = SnapVz()
+    code, body = snap_cli(fake, ["create", "t1", "s", "--json"])
+    assert code == 0, body
+    assert list(body) == [
+        "tool", "version", "status", "error", "snapshot", "source", "timings_s",
+        "warnings",
+    ], list(body)  # fmt: skip
+    assert body["tool"] == "vm-snapshot-create"
+    assert set(body["snapshot"]) == {
+        "name", "pool", "volume", "path", "virtual_gib", "allocated_gib", "created_at"
+    }, body["snapshot"]  # fmt: skip
+    assert (body["snapshot"]["virtual_gib"], body["snapshot"]["allocated_gib"]) == (
+        8,
+        2.0,
+    )
+    assert body["source"] == {
+        "name": "t1",
+        "uuid": "6f6da4d2-9d67-4d6a-9c1a-0f0f0f0f0f0f",
+        "was_running": True,
+        "started_for_seal": False,
+        "sealed": True,
+        "state": "shut off",
+    }, body["source"]
+    assert set(body["timings_s"]) == {"seal", "shutdown", "copy"}
+    meta = fake.meta
+    assert meta["schema"] == 1 and meta["guest_hostname"] == "src-host", meta
+    assert meta["defaults"] == {"ram_gib": 2, "vcpu": 2, "disk_gib": 8}, meta
+    assert (meta["user"], meta["sudo_group"], meta["release"]) == ("ci", "sudo", "r")
+    vz.parse_snapshot_meta(json.dumps(meta))  # what create writes, it can read
+
+    # A shut-off source is started to be sealed; --start-source brings it back.
+    fake = SnapVz(running=False)
+    code, body = snap_cli(fake, ["create", "t1", "s", "--start-source", "--json"])
+    assert code == 0 and body["source"]["started_for_seal"] is True, body
+    assert (
+        body["source"]["state"] == "running" and fake.calls.count("start_domain") == 2
+    )
+
+    # Seal failure: stage seal, nothing copied.
+    fake = SnapVz(fail="seal_guest")
+    code, body = snap_cli(fake, ["create", "t1", "s", "--json"])
+    assert code == 1, body
+    assert (body["error"]["code"], body["error"]["stage"]) == (
+        "snapshot-seal-failed",
+        "seal",
+    ), body["error"]
+    assert "copy_to_snapshot" not in fake.calls and body["snapshot"] is None
+    assert body["source"]["sealed"] is False and body["source"]["state"] == "running"
+
+    # Copy failure: no metadata written, no snapshot reported.
+    fake = SnapVz(fail="copy_to_snapshot")
+    code, body = snap_cli(fake, ["create", "t1", "s", "--json"])
+    assert body["error"]["stage"] == "copy" and "write_snapshot_meta" not in fake.calls
+    assert body["snapshot"] is None and body["source"]["state"] == "shut off", body
+
+    # Metadata failure: the copied disk is removed again.
+    fake = SnapVz(fail="write_snapshot_meta")
+    code, body = snap_cli(fake, ["create", "t1", "s", "--json"])
+    assert body["error"]["code"] == "snapshot-metadata-failed", body
+    assert ("delete_volume_quiet", "s.snapshot.qcow2") in fake.calls, fake.calls
+
+    code, body = snap_cli(SnapVz(snapshots=["s"]), ["create", "t1", "s", "--json"])
+    assert body["error"]["code"] == "snapshot-already-exists", body
+    code, body = snap_cli(SnapVz(), ["create", "ghost", "s", "--json"])
+    assert body["error"]["code"] == "vm-not-defined", body
+    code, body = snap_cli(SnapVz(), ["create", "1bad", "s", "--json"])
+    assert code == 2 and body["error"]["code"] == "usage", body
+
+    # Delete refuses while clones depend on the snapshot.
+    fake = SnapVz(snapshots=["s"], clones=["c1", "c2"])
+    code, body = snap_cli(fake, ["delete", "s", "--json"])
+    assert code == 1 and body["error"]["code"] == "snapshot-in-use", body
+    assert body["clones"] == ["c1", "c2"] and "delete_snapshot" not in fake.calls
+    fake = SnapVz(snapshots=["s"])
+    code, body = snap_cli(fake, ["delete", "s", "--json"])
+    assert code == 0 and "delete_snapshot" in fake.calls, body
+    code, body = snap_cli(SnapVz(), ["delete", "s", "--json"])
+    assert body["error"]["code"] == "snapshot-not-found", body
 
     print("unit checks ok")
 

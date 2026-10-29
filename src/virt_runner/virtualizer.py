@@ -1785,6 +1785,14 @@ class Virtualizer:
         lines = result.stdout.strip().splitlines()
         return lines[0].strip() if lines else ""
 
+    def start_domain(self, name: str) -> None:
+        """``virsh start`` *name*.
+
+        Raises:
+            RuntimeError: when libvirt refuses to start it.
+        """
+        _run(["virsh", "start", name])
+
     def shutdown_and_wait(self, name: str, timeout_s: int) -> None:
         """Power the guest off cooperatively and wait until it is off.
 
