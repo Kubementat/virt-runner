@@ -88,6 +88,9 @@ virt-runner ssh myvm
 
 # 3. Done
 virt-runner destroy myvm
+
+# Snapshot a provisioned VM once, then clone it in seconds (see "Snapshots and clones")
+virt-runner snapshot create myvm golden && virt-runner create c1 --from-snapshot golden
 ```
 
 Requirements: the host setup from [Install](#install) — a KVM host where `virsh` works without
@@ -102,6 +105,11 @@ virt-runner create NAME          # build + boot; --distro (ubuntu|arch|fedora),
                                  # --ssh-key, --mount HOST[:GUEST] (repeatable; virtiofs share),
                                  # --script FILE (repeatable; runs in the guest after boot),
                                  # --no-boot, --keep-going
+virt-runner create NAME --from-snapshot SNAP [--keep-hostname]
+                                 # clone a snapshot (thin overlay, new identity)
+virt-runner snapshot create VM SNAP   # seal + shut down VM, copy its disk
+                                 # --start-source, --shutdown-timeout SECONDS (300)
+virt-runner snapshot list|show SNAP|delete SNAP
 virt-runner destroy NAME         # undefine + delete disk (idempotent)
 virt-runner list                 # only VMs whose disk lives in vm-pool
 virt-runner modify NAME          # change an existing VM in place (see "Changing an existing VM")
@@ -118,14 +126,14 @@ virt-runner setup [--check]      # host prerequisites — the bundled installer
 Cached `latest`/`current` images are never refreshed — delete
 `~/vm-images/<distro>/<release>/` to pick up a newer build.
 
-All five VM commands accept `--json`: stdout carries **exactly one** JSON document (success *or*
+All VM and snapshot commands accept `--json`: stdout carries **exactly one** JSON document (success *or*
 error envelope), everything else goes to stderr. `VM_JSON_TRACE=1` re-sends progress lines to
 stderr for debugging. Envelope and error codes: [JSON output](#json-output).
 
 `setup` has no alias and no `--json`: it is not a VM command, it is a privileged host operation.
 
 Short aliases for the VM commands: `c` = `create`, `d` = `destroy`, `ls` = `list`,
-`s` = `ssh`, `m` = `modify` (identical flags, exit codes and JSON `tool` ids).
+`s` = `ssh`, `m` = `modify`, `snap` = `snapshot` (identical flags, exit codes and JSON `tool` ids).
 
 ```bash
 virt-runner create myvm --json | jq -r .vm.ssh_command
@@ -140,12 +148,14 @@ virt-runner create myvm --json | jq -r .vm.ssh_command
 {"tool": "vm-create", "version": "…", "status": "error", "error": {"code": "…", "message": "…"}}
 ```
 
-- `tool` — the command: `vm-create`, `vm-destroy`, `vm-list`, `vm-modify`, `vm-ssh`.
+- `tool` — the command: `vm-create`, `vm-destroy`, `vm-list`, `vm-modify`, `vm-ssh`,
+  `vm-snapshot-create`, `vm-snapshot-list`, `vm-snapshot-show`, `vm-snapshot-delete`.
 - `version` — installed package version.
 - `status` — `success` or `error`.
 - `error` — `null` on success, else `{code, message}` plus `stage` when the
-  failure belongs to a `create` stage (`preflight`, `image`, `cloud-init`,
-  `create`, `wait-ip`, `ssh-verify`, `script`).
+  failure belongs to a `create` stage (`preflight`, `image` — or `snapshot` with
+  `--from-snapshot` —, `cloud-init`, `create`, `wait-ip`, `ssh-verify`, `script`) or a
+  `snapshot create` stage (`preflight`, `seal`, `shutdown`, `copy`, `metadata`, `restart`).
 - The remaining top-level keys are the command's sections (`vm`, `image`,
   `vms`, …) — the same state the text report prints. `vm-list` entries carry
   `vcpu`/`ram_gib`/`disk_gib` read from the **live** XML, i.e. what the guest runs:
@@ -192,6 +202,113 @@ failure, `2` usage error.
 | `ssh-timeout` | The SSH round-trip never succeeded within the wait window |
 | `virtiofsd-missing` | `--mount` given but `/usr/libexec/virtiofsd` is not installed |
 | `script-failed` | A `--script` exited non-zero (the VM is kept running) |
+| `snapshot-already-exists` | `snapshot create` with a name already used by a snapshot |
+| `snapshot-not-found` | No snapshot of that name (`show`/`delete`/`create --from-snapshot`) |
+| `snapshot-incomplete` | The disk volume exists but its metadata does not (or vice versa); delete and re-create it |
+| `snapshot-seal-failed` | The in-guest seal script exited non-zero (the VM is kept running) |
+| `vm-shutdown-timeout` | The guest did not power off within `--shutdown-timeout`; no forced power-off was done |
+| `snapshot-copy-failed` | `virsh vol-create-from` failed (no partial volume left) |
+| `snapshot-metadata-failed` | Writing the metadata sidecar failed (the copied volume was removed) |
+| `snapshot-in-use` | `snapshot delete` while clone disks are backed by it |
+| `overlay-create-failed` | `virsh vol-create-as --backing-vol` failed during `create --from-snapshot` |
+
+## Snapshots and clones
+
+Provision a VM once, snapshot it, and start any number of new VMs from the snapshot in seconds.
+Each clone has the snapshot's disk contents and its own domain name, MAC, IP, machine-id and SSH
+host keys; several clones of one snapshot run at the same time.
+
+```bash
+virt-runner create builder --script install-k3s.sh      # minutes, once
+virt-runner snapshot create builder k3s-ready            # seal + shut down + copy
+virt-runner destroy builder                              # optional: the snapshot is independent
+virt-runner create t1 --from-snapshot k3s-ready --keep-hostname --script test.sh   # seconds
+virt-runner snapshot list                                # sizes and the clones of each
+virt-runner snapshot delete k3s-ready                    # refused while clones exist
+```
+
+**What `snapshot create VM SNAP` does.** It runs a small seal script in the guest over SSH
+(starting the VM first if it is off): it removes virt-runner's own "cloud-init disabled" marker,
+runs `cloud-init clean --logs`, resets `/etc/machine-id`, and removes virt-runner's virtiofs
+lines from `/etc/fstab`. It then shuts the guest down cooperatively — never a forced power-off;
+`--shutdown-timeout` (default 300 s; a guest running k3s took 91 s) — and copies the disk into
+the pool as `<SNAP>.snapshot.qcow2`, flattened and standalone, next to a small metadata volume
+`<SNAP>.snapshot.json`. Everything goes through `virsh`; no sudo.
+
+**The source stays sealed and shut off.** `--start-source` starts it again. Either way, the next
+boot of the source re-runs cloud-init first-boot setup with its own seed: it gets **new SSH host
+keys**; its hostname, machine-id, IP and `--mount` shares stay the same. The JSON reports this as
+`source.sealed: true` and `source.state`.
+
+**Clones.** `create NAME --from-snapshot SNAP` builds a thin qcow2 overlay backed by the snapshot
+(it only stores what the clone writes) and boots it with a new cloud-init seed, so the guest runs
+first-boot setup for its new identity. `--ram`, `--vcpu` and `--disk` default to the values
+recorded in the snapshot; `--disk` can only grow it (the root filesystem is grown on first
+boot). `--ssh-key`, `--mount`, `--script` and `--no-boot` work as usual; `--distro`, `--release`,
+`--image`, `--user` and `--keep-going` are usage errors, because the snapshot fixes the OS and the
+user. A clone mounts only the `--mount` shares given when it is created, never the source's.
+
+**Hostname.** By default the clone's hostname is its name, and `vm.dns_name` is `<name>.default`
+as for any VM. `--keep-hostname` keeps the hostname recorded in the snapshot instead — the mode for
+apps whose identity is the hostname. `vm.dns_name` is then `null`: libvirt's DNS name follows
+the guest hostname and may belong to another clone with the same hostname, so use `vm.ip`.
+
+**k3s.** The node name is the hostname. A clone with a *new* hostname registers a second node;
+the old one goes `NotReady`, and pods with local-path volumes stay `Pending` (the PV is pinned to
+the old node). With `--keep-hostname` the node re-registers under its new IP (~16 s after boot,
+all pods Ready after ~50 s on the reference host). Wait for pods, not for the node status alone:
+right after boot the node still shows the `Ready` stored before the shutdown. Configs that pin
+`node-ip`/`advertise-address` or use embedded etcd break on the IP change.
+
+**Pool space and timings.** A snapshot is an uncompressed copy of the allocated data: a fresh
+Ubuntu VM gives ~2.1 GiB, a k3s VM ~3.3 GiB; `snapshot list` reports `allocated_gib`. Measured on
+the reference host (single runs): seal ~1 s, idle shutdown 2-4 s, copy ~1.5 s; a clone is
+SSH-ready 11-16 s after `create` starts on Ubuntu 26.04, ~16 s on Fedora 44 and ~45 s on Arch
+(its sshd waits for `systemd-time-wait-sync`). Verified on all three on x86_64 (Ubuntu in the
+integration suite, Fedora and Arch by hand); aarch64 is untested. On Fedora a clone's DHCP lease
+may carry the source's hostname (known, low priority).
+
+**Keep in mind.**
+
+- Deleting a snapshot corrupts every clone backed by it. `snapshot delete` refuses with
+  `snapshot-in-use` while any pool volume is layered on it, but plain `virsh vol-delete` or `rm`
+  bypasses that check — libvirt itself does not refuse.
+- The seal is not a sysprep: clones share every app-level secret (cluster CA, tokens, shell
+  history, the snapshot's authorized key). Do not share snapshots across trust boundaries.
+- A snapshot is a template for new VMs, not a restore point: there is no revert. Memory state is
+  not kept.
+
+```json
+{"tool": "vm-snapshot-create", "version": "…", "status": "success", "error": null,
+ "snapshot": {"name": "k3s-ready", "pool": "vm-pool", "volume": "k3s-ready.snapshot.qcow2",
+              "path": "/var/lib/libvirt/images/vms/k3s-ready.snapshot.qcow2",
+              "virtual_gib": 30, "allocated_gib": 3.25, "created_at": "2026-10-28T21:14:03Z"},
+ "source": {"name": "builder", "uuid": "…", "was_running": true, "started_for_seal": false,
+            "sealed": true, "state": "shut off"},
+ "timings_s": {"seal": 1.0, "shutdown": 91.0, "copy": 1.7}, "warnings": []}
+```
+
+A clone's document is the normal `vm-create` document with `image: null`, `vm.snapshot` and a
+top-level `snapshot` section (`vm.hostname`, `vm.snapshot: null` and `snapshot: null` on a
+normal create):
+
+```json
+{"tool": "vm-create", "status": "success", "booted": true,
+ "vm": {"name": "t1", "ip": "192.168.122.57", "hostname": "builder", "dns_name": null,
+        "ssh_command": "ssh -i ~/.ssh/virt_runner_key ubuntu@192.168.122.57",
+        "snapshot": "k3s-ready", "…": "…"},
+ "image": null,
+ "snapshot": {"name": "k3s-ready", "volume": "k3s-ready.snapshot.qcow2", "source_vm": "builder",
+              "created_at": "2026-10-28T21:14:03Z", "keep_hostname": true},
+ "scripts": []}
+```
+
+`snapshot list` carries `{pool, count, snapshots: [{name, created_at, source_vm, distro, release,
+arch, virtual_gib, allocated_gib, clones}]}`; a snapshot missing either volume is listed with
+`metadata: null, state: "incomplete"`. `snapshot show` prints the whole metadata plus `volume`,
+`path`, `allocated_gib` and `clones`. `snapshot delete` reports `{name, volumes: [{name, deleted,
+already_absent}], warnings}`, and on `snapshot-in-use` the `clones` it found. `list` reports
+`snapshot` per VM (null unless it is a clone).
 
 ## Changing an existing VM (`modify`)
 

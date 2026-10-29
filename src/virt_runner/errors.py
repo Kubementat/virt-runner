@@ -18,9 +18,11 @@ class VirtError(RuntimeError):
         message: Human-readable text — identical to the text-mode stderr line
             minus the ``vm-<command>: `` prefix.
         code: Stable kebab-case code from spec §5.2.
-        stage: ``vm-create`` pipeline stage (``preflight``, ``image``,
-            ``cloud-init``, ``create``, ``wait-ip``, ``ssh-verify``, ``script``) when the
-            failure belongs to one.
+        stage: Pipeline stage when the failure belongs to one. ``vm-create``:
+            ``preflight``, ``image`` (or ``snapshot`` with ``--from-snapshot``),
+            ``cloud-init``, ``create``, ``wait-ip``, ``ssh-verify``, ``script``.
+            ``vm-snapshot-create``: ``preflight``, ``seal``, ``shutdown``,
+            ``copy``, ``metadata``, ``restart``.
     """
 
     def __init__(self, message: str, code: str, stage: str | None = None) -> None:

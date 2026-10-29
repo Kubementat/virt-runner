@@ -201,6 +201,17 @@ def parse_capacity_gib(info: str) -> int | None:
     return None
 
 
+def parse_vol_info_bytes(info: str) -> dict[str, int]:
+    """The sized rows of ``virsh vol-info --bytes``: ``{"capacity": …, "allocation": …}``."""
+    rows: dict[str, int] = {}
+    for line in info.splitlines():
+        key, sep, rest = line.partition(":")
+        match = re.fullmatch(r"\s*([0-9]+) bytes\s*", rest)
+        if sep and match:
+            rows[key.strip().lower()] = int(match.group(1))
+    return rows
+
+
 def volume_name(name: str) -> str:
     """The disk volume of a VM: ``<NAME>_vda.qcow2``.
 
@@ -208,6 +219,56 @@ def volume_name(name: str) -> str:
     ``vm-list`` (pool-membership test) and torn down by it in ``vm-destroy``.
     """
     return f"{name}_vda.qcow2"
+
+
+SNAPSHOT_SUFFIX = ".snapshot.qcow2"
+SNAPSHOT_META_SUFFIX = ".snapshot.json"
+#: Version of the sidecar document; a reader refuses any other value.
+SNAPSHOT_SCHEMA = 1
+
+
+def snapshot_volume(snap: str) -> str:
+    """The disk volume of a snapshot: ``<SNAP>.snapshot.qcow2``.
+
+    The suffix cannot collide with a VM's ``_vda.qcow2``/``-cloudinit.iso``, so
+    snapshots and VMs keep separate name spaces in the one pool.
+    """
+    return f"{snap}{SNAPSHOT_SUFFIX}"
+
+
+def snapshot_meta_volume(snap: str) -> str:
+    """The metadata sidecar of a snapshot: ``<SNAP>.snapshot.json`` (raw)."""
+    return f"{snap}{SNAPSHOT_META_SUFFIX}"
+
+
+def snapshot_volume_xml(name: str, capacity_bytes: int) -> str:
+    """``vol-create-from`` definition of a snapshot volume.
+
+    ``<compat>1.1</compat>`` is not optional: without it libvirt 10.0 writes a
+    qcow2 v2 image (``compat 0.10``). Mode ``0644`` keeps the base readable by
+    the hypervisor user and by ``qemu-img info`` without sudo.
+    """
+    vol = ET.Element("volume")
+    ET.SubElement(vol, "name").text = name
+    ET.SubElement(vol, "capacity", unit="bytes").text = str(capacity_bytes)
+    target = ET.SubElement(vol, "target")
+    ET.SubElement(target, "format", type="qcow2")
+    ET.SubElement(target, "compat").text = "1.1"
+    ET.SubElement(ET.SubElement(target, "permissions"), "mode").text = "0644"
+    return ET.tostring(vol, encoding="unicode")
+
+
+def backing_path_of(vol_xml: str) -> str | None:
+    """``<backingStore><path>`` of a ``virsh vol-dumpxml``, ``None`` if flat.
+
+    libvirt keeps reporting the path after the backing file is gone, which is
+    exactly what lets the dependents scan find orphaned overlays.
+    """
+    try:
+        root = ET.fromstring(vol_xml)
+    except ET.ParseError:
+        return None
+    return root.findtext("backingStore/path") or None
 
 
 def lease_file(command: str) -> str:
@@ -231,6 +292,69 @@ class TeardownResult:
     volume_already_absent: bool
     confirmation: str
     warning: str | None
+
+
+@dataclass(frozen=True)
+class SnapshotInfo:
+    """A snapshot's validated sidecar (schema v1, see the README).
+
+    The fields are the ones ``create --from-snapshot`` builds a clone from;
+    ``meta`` is the whole document, which ``snapshot show`` prints verbatim.
+    """
+
+    name: str
+    user: str
+    sudo_group: str
+    os_variant: str
+    distro: str | None
+    release: str | None
+    guest_hostname: str | None
+    virtual_gib: int
+    defaults: dict[str, int]
+    meta: dict[str, Any]
+
+
+#: Keys a schema-v1 sidecar must carry for a clone to be built from it.
+_SNAPSHOT_REQUIRED = ("name", "user", "sudo_group", "os_variant", "virtual_gib")
+
+
+def parse_snapshot_meta(text: str) -> SnapshotInfo:
+    """Parse and validate a sidecar document.
+
+    Raises:
+        VirtError: ``snapshot-incomplete`` for bad JSON, a schema other than
+            :data:`SNAPSHOT_SCHEMA` or a missing required key.
+    """
+    try:
+        meta = json.loads(text)
+    except json.JSONDecodeError:
+        meta = None
+    problem = None
+    if not isinstance(meta, dict):
+        problem = "is not a JSON object"
+    elif meta.get("schema") != SNAPSHOT_SCHEMA:
+        problem = f"has schema {meta.get('schema')!r}, expected {SNAPSHOT_SCHEMA}"
+    else:
+        missing = [k for k in _SNAPSHOT_REQUIRED if not meta.get(k)]
+        if missing:
+            problem = f"lacks {', '.join(missing)}"
+    if problem:
+        raise VirtError(
+            f"snapshot metadata {problem} — delete and re-create the snapshot",
+            "snapshot-incomplete",
+        )
+    return SnapshotInfo(
+        name=meta["name"],
+        user=meta["user"],
+        sudo_group=meta["sudo_group"],
+        os_variant=meta["os_variant"],
+        distro=meta.get("distro"),
+        release=meta.get("release"),
+        guest_hostname=meta.get("guest_hostname"),
+        virtual_gib=int(meta["virtual_gib"]),
+        defaults=dict(meta.get("defaults") or {}),
+        meta=meta,
+    )
 
 
 @dataclass(frozen=True)
@@ -501,14 +625,19 @@ def script_command(script: Path) -> str:
     )
 
 
-def render_meta_data(id_val: str, name: str) -> str:
-    """Generate cloud-init meta-data YAML."""
+def render_meta_data(id_val: str, name: str, hostname: str | None = None) -> str:
+    """Generate cloud-init meta-data YAML.
+
+    *hostname* defaults to the VM name; a ``--keep-hostname`` clone passes the
+    hostname recorded when its snapshot was sealed.
+    """
+    host = hostname or name
     return (
         f"id: {id_val}\n"
-        f"local-hostname: {name}\n"
+        f"local-hostname: {host}\n"
         "hostnames:\n"
-        f"  local: {name}\n"
-        f"  host: {name}\n"
+        f"  local: {host}\n"
+        f"  host: {host}\n"
     )
 
 
@@ -836,19 +965,7 @@ class Virtualizer:
                     "cloud-init",
                 )
             try:
-                _run(
-                    [
-                        "virsh",
-                        "vol-create-as",
-                        self.POOL,
-                        volume,
-                        "--capacity",
-                        str(Path(tmp).stat().st_size),
-                        "--format",
-                        "raw",
-                    ]
-                )
-                _run(["virsh", "vol-upload", "--pool", self.POOL, volume, tmp])
+                self._upload_raw_volume(volume, tmp)
             except RuntimeError as exc:
                 self.delete_cloud_init_iso_quiet(name)
                 raise VirtError(
@@ -862,6 +979,28 @@ class Virtualizer:
         output.progress(f"NoCloud seed ISO ready: {self.POOL}/{volume}")
         return volume
 
+    def _upload_raw_volume(self, volume: str, path: str) -> None:
+        """Create a raw pool volume the size of *path* and upload *path* into it.
+
+        The way to put a host file into the root-owned pool without sudo.
+
+        Raises:
+            RuntimeError: from either ``virsh`` call; the caller cleans up.
+        """
+        _run(
+            [
+                "virsh",
+                "vol-create-as",
+                self.POOL,
+                volume,
+                "--capacity",
+                str(Path(path).stat().st_size),
+                "--format",
+                "raw",
+            ]
+        )
+        _run(["virsh", "vol-upload", "--pool", self.POOL, volume, path])
+
     # ------------------------------------------------------------------
     # Cloud-init
     # ------------------------------------------------------------------
@@ -873,8 +1012,11 @@ class Virtualizer:
         sudo_group: str,
         ssh_key: str,
         mounts: list[dict[str, str]] = (),
+        hostname: str | None = None,
     ) -> tuple[str, str]:
         """Generate cloud-init user-data and meta-data files.
+
+        *hostname* overrides the guest hostname (default: *name*).
 
         Returns:
             Tuple of ``(user_data_path, meta_data_path)``.
@@ -893,7 +1035,7 @@ class Virtualizer:
             ) from exc
 
         # meta-data and user-data via pure renderers.
-        meta_data = render_meta_data(new_id, name)
+        meta_data = render_meta_data(new_id, name, hostname)
         user_data = render_user_data(user_name, sudo_group, ssh_key_line, mounts)
 
         (Path(tmp_dir) / "meta-data").write_text(meta_data)
@@ -1170,17 +1312,19 @@ class Virtualizer:
         return _stdout(["virsh", "domstate", name]).strip()
 
     def set_domain_metadata(
-        self, name: str, distro: str, user: str, identity: str
+        self, name: str, distro: str, user: str, identity: str, **extra: str | None
     ) -> None:
         """Record the guest distro/user/identity in the domain's metadata.
 
         Read back by ``ssh``/``list`` via :meth:`domain_meta`, so both log in
-        as the user that was actually created on the guest.
+        as the user that was actually created on the guest. *extra* adds the
+        optional ``release``/``image_url``/``mounts`` (JSON)/``snapshot``
+        attributes that ``snapshot create`` copies into a snapshot; ``None``
+        values are left out, so metadata written before them stays valid.
         """
-        xml = ET.tostring(
-            ET.Element("virt-runner", distro=distro, user=user, identity=identity),
-            encoding="unicode",
-        )
+        attrs = {"distro": distro, "user": user, "identity": identity}
+        attrs.update({k: v for k, v in extra.items() if v is not None})
+        xml = ET.tostring(ET.Element("virt-runner", attrs), encoding="unicode")
         _run(
             [
                 "virsh",
@@ -1557,17 +1701,7 @@ class Virtualizer:
         # 2. Delete volume. An already-absent volume is a warning, not a
         #    failure (D7): the teardown's contract is "nothing left behind".
         volume = volume_name(name)
-        result = _spawn(["virsh", "vol-delete", volume, self.POOL])
-        err = result.stderr.lower()
-        volume_absent = result.returncode != 0 and any(
-            kw in err for kw in ("not found", "no such volume", "does not exist")
-        )
-        if result.returncode != 0 and not volume_absent:
-            raise VirtError(
-                f"failed to delete volume '{volume}' in pool '{self.POOL}': "
-                f"{result.stderr.strip()}",
-                "volume-delete-failed",
-            )
+        volume_absent = self._delete_volume(volume)
 
         # 3. Best-effort: the NoCloud seed ISO volume. It stays attached for
         #    the VM's lifetime — the domain XML pins its file path, so a
@@ -1592,6 +1726,292 @@ class Virtualizer:
             confirmation=confirm,
             warning=warning,
         )
+
+    def _delete_volume(self, volume: str) -> bool:
+        """``vol-delete`` *volume*; return True when it was already absent.
+
+        Raises:
+            VirtError: ``volume-delete-failed`` for any other failure.
+        """
+        result = _spawn(["virsh", "vol-delete", volume, self.POOL])
+        err = result.stderr.lower()
+        absent = result.returncode != 0 and any(
+            kw in err for kw in ("not found", "no such volume", "does not exist")
+        )
+        if result.returncode != 0 and not absent:
+            raise VirtError(
+                f"failed to delete volume '{volume}' in pool '{self.POOL}': "
+                f"{result.stderr.strip()}",
+                "volume-delete-failed",
+            )
+        return absent
+
+    # ------------------------------------------------------------------
+    # Snapshots and clones
+    # ------------------------------------------------------------------
+
+    def seal_guest(self, user: str, ip: str, identity: str | None = None) -> str:
+        """Run :data:`_SEAL_SCRIPT` in the guest as root; return its hostname.
+
+        Raises:
+            VirtError: ``snapshot-seal-failed`` (stage ``seal``) on a non-zero
+                exit; the guest keeps running, possibly half-sealed.
+        """
+        cmd = [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "LogLevel=ERROR",
+            "-o",
+            "ConnectTimeout=5",
+            *_ssh_args(identity),
+            f"{user}@{ip}",
+            "sudo",
+            "-n",
+            "bash",
+            "-s",
+        ]
+        result = _spawn(cmd, input=_SEAL_SCRIPT)
+        if result.returncode != 0:
+            detail = " ".join((result.stderr or result.stdout).split())[-300:]
+            raise VirtError(
+                f"seal script failed in {user}@{ip} (exit {result.returncode}): "
+                f"{detail} — the VM is kept running and may be half-sealed; "
+                "re-run snapshot create, or destroy the VM",
+                "snapshot-seal-failed",
+                "seal",
+            )
+        lines = result.stdout.strip().splitlines()
+        return lines[0].strip() if lines else ""
+
+    def start_domain(self, name: str) -> None:
+        """``virsh start`` *name*.
+
+        Raises:
+            RuntimeError: when libvirt refuses to start it.
+        """
+        _run(["virsh", "start", name])
+
+    def shutdown_and_wait(self, name: str, timeout_s: int) -> None:
+        """Power the guest off cooperatively and wait until it is off.
+
+        Unlike :meth:`reboot` there is no ``destroy`` fallback: a power cut
+        right after the seal would put an unclean filesystem into the snapshot.
+
+        Raises:
+            VirtError: ``vm-shutdown-timeout`` (stage ``shutdown``).
+        """
+        if self.get_domain_state(name) != STATE_RUNNING:
+            return
+        _spawn(["virsh", "shutdown", name])
+        if not _poll(
+            lambda: self.get_domain_state(name) != STATE_RUNNING,
+            timeout_s,
+            self.POLL_INTERVAL_S,
+        ):
+            raise VirtError(
+                f"VM '{name}' did not power off within {timeout_s}s; no forced "
+                "power-off was done — stop its workload or raise --shutdown-timeout",
+                "vm-shutdown-timeout",
+                "shutdown",
+            )
+
+    def volume_bytes(self, volume: str) -> dict[str, int]:
+        """``capacity``/``allocation`` of a pool volume in bytes (``{}`` if absent)."""
+        return parse_vol_info_bytes(
+            _stdout(["virsh", "vol-info", "--bytes", "--pool", self.POOL, volume])
+        )
+
+    def copy_to_snapshot(self, src_volume: str, snap: str) -> None:
+        """Copy *src_volume* into a new flat ``<SNAP>.snapshot.qcow2``.
+
+        libvirtd runs ``qemu-img convert``, which flattens a backing chain, so
+        a snapshot of a clone is standalone too.
+
+        Raises:
+            VirtError: ``snapshot-copy-failed``; a half-written volume is
+                removed (but never a snapshot that already existed).
+        """
+        volume = snapshot_volume(snap)
+        capacity = self.volume_bytes(src_volume).get("capacity")
+        if not capacity:
+            raise VirtError(
+                f"cannot read the size of source volume '{src_volume}'",
+                "snapshot-copy-failed",
+                "copy",
+            )
+        with tempfile.NamedTemporaryFile(
+            "w", prefix="virt-runner-snap-", suffix=".xml"
+        ) as xml:
+            xml.write(snapshot_volume_xml(volume, capacity))
+            xml.flush()
+            result = _spawn(
+                [
+                    "virsh",
+                    "vol-create-from",
+                    self.POOL,
+                    xml.name,
+                    src_volume,
+                    "--inputpool",
+                    self.POOL,
+                ]
+            )
+        if result.returncode != 0:
+            if "already in use" not in result.stderr:
+                self.delete_volume_quiet(volume)
+            raise VirtError(
+                f"failed to copy '{src_volume}' to '{volume}': {result.stderr.strip()}",
+                "snapshot-copy-failed",
+                "copy",
+            )
+
+    def write_snapshot_meta(self, snap: str, meta: dict[str, Any]) -> None:
+        """Upload *meta* as the raw sidecar volume ``<SNAP>.snapshot.json``.
+
+        Raises:
+            VirtError: ``snapshot-metadata-failed``; no sidecar is left.
+        """
+        volume = snapshot_meta_volume(snap)
+        with tempfile.NamedTemporaryFile(
+            "w", prefix="virt-runner-snap-", suffix=".json"
+        ) as f:
+            json.dump(meta, f, indent=2)
+            f.flush()
+            try:
+                self._upload_raw_volume(volume, f.name)
+            except RuntimeError as exc:
+                self.delete_volume_quiet(volume)
+                raise VirtError(
+                    f"failed to write snapshot metadata '{volume}'",
+                    "snapshot-metadata-failed",
+                    "metadata",
+                ) from exc
+
+    def pool_volumes(self) -> list[str]:
+        """Names of every volume in the pool (``vol-list`` has no ``--name``)."""
+        listing = _stdout(["virsh", "vol-list", self.POOL])
+        return [line.split()[0] for line in listing.splitlines()[2:] if line.split()]
+
+    def snapshot_names(self) -> list[str]:
+        """Every snapshot with a disk *or* a sidecar volume, so neither half hides."""
+        names = set()
+        for vol in self.pool_volumes():
+            for suffix in (SNAPSHOT_SUFFIX, SNAPSHOT_META_SUFFIX):
+                if vol.endswith(suffix) and len(vol) > len(suffix):
+                    names.add(vol[: -len(suffix)])
+        return sorted(names)
+
+    def read_snapshot_meta(self, snap: str) -> SnapshotInfo:
+        """Download and validate a snapshot's sidecar.
+
+        Raises:
+            VirtError: ``snapshot-not-found`` when neither volume exists,
+                ``snapshot-incomplete`` when only one does or the sidecar is
+                invalid.
+        """
+        volumes = set(self.pool_volumes())
+        has_disk = snapshot_volume(snap) in volumes
+        has_meta = snapshot_meta_volume(snap) in volumes
+        if not (has_disk or has_meta):
+            raise VirtError(f"snapshot '{snap}' not found", "snapshot-not-found")
+        if not (has_disk and has_meta):
+            missing = "metadata" if has_disk else "disk volume"
+            raise VirtError(
+                f"snapshot '{snap}' has no {missing} — delete and re-create it",
+                "snapshot-incomplete",
+            )
+        with tempfile.TemporaryDirectory(prefix="virt-runner-snap-") as tmp:
+            path = Path(tmp) / "meta.json"
+            result = _spawn(
+                [
+                    "virsh",
+                    "vol-download",
+                    "--pool",
+                    self.POOL,
+                    snapshot_meta_volume(snap),
+                    str(path),
+                ]
+            )
+            text = path.read_text() if result.returncode == 0 else ""
+        return parse_snapshot_meta(text)
+
+    def backing_users(self) -> dict[str, list[str]]:
+        """Backing path -> the pool volumes layered on it (one dumpxml each).
+
+        libvirt itself happily deletes a backing file under a running clone, so
+        this scan is the only thing standing between ``snapshot delete`` and
+        corrupted clone disks. Dangling paths are reported as well.
+        """
+        users: dict[str, list[str]] = {}
+        for vol in self.pool_volumes():
+            path = backing_path_of(_stdout(["virsh", "vol-dumpxml", vol, self.POOL]))
+            if path:
+                users.setdefault(path, []).append(vol)
+        return users
+
+    def snapshot_path(self, snap: str) -> str:
+        """Absolute path of the snapshot disk, as overlays record it."""
+        return f"{self.get_pool_path().rstrip('/')}/{snapshot_volume(snap)}"
+
+    def snapshot_dependents(
+        self, snap: str, users: dict[str, list[str]] | None = None
+    ) -> list[str]:
+        """Clones (VM names, else bare volume names) backed by *snap*."""
+        users = self.backing_users() if users is None else users
+        return sorted(
+            vol.removesuffix("_vda.qcow2")
+            for vol in users.get(self.snapshot_path(snap), [])
+        )
+
+    def delete_snapshot(self, snap: str) -> list[dict[str, Any]]:
+        """Delete both snapshot volumes; the caller has checked for dependents.
+
+        Returns:
+            One ``{name, deleted, already_absent}`` entry per volume.
+
+        Raises:
+            VirtError: ``volume-delete-failed``.
+        """
+        report = []
+        for volume in (snapshot_volume(snap), snapshot_meta_volume(snap)):
+            absent = self._delete_volume(volume)
+            report.append(
+                {"name": volume, "deleted": not absent, "already_absent": absent}
+            )
+        return report
+
+    def create_overlay_volume(self, name: str, disk_gib: int, snap: str) -> str:
+        """Thin qcow2 overlay ``<NAME>_vda.qcow2`` backed by the snapshot.
+
+        Raises:
+            VirtError: ``overlay-create-failed`` (stage ``create``).
+        """
+        volume = volume_name(name)
+        try:
+            _run(
+                [
+                    "virsh",
+                    "vol-create-as",
+                    self.POOL,
+                    volume,
+                    "--capacity",
+                    f"{disk_gib}G",
+                    "--format",
+                    "qcow2",
+                    "--backing-vol",
+                    snapshot_volume(snap),
+                    "--backing-vol-format",
+                    "qcow2",
+                ]
+            )
+        except RuntimeError as exc:
+            raise VirtError(
+                f"failed to create overlay '{volume}' on snapshot '{snap}'",
+                "overlay-create-failed",
+                "create",
+            ) from exc
+        return volume
 
     # ------------------------------------------------------------------
     # Modify (vCPU / RAM / disk / networking)
@@ -2031,4 +2451,28 @@ case $fstype in
   *) echo "virt-runner: unsupported guest filesystem '$fstype' — grow it manually"; exit 0 ;;
 esac
 echo "virt-runner: guest filesystem grown"
+"""
+
+
+#: Turns a provisioned guest back into "next boot is a first boot" before its
+#: disk is copied into a snapshot: virt-runner's own ``cloud-init.disabled``
+#: marker would make every clone ignore its new seed, and a shared machine-id
+#: makes networkd send the same DHCP client-id from every clone. SSH host keys
+#: stay: cloud-init rotates them on the new instance, and deleting them here
+#: would leave a clone whose cloud-init failed unreachable. ``uname -n``, not
+#: ``hostname`` (Arch ships no such binary). The first stdout line is the guest
+#: hostname, recorded for ``--keep-hostname``.
+_SEAL_SCRIPT = r"""set -eu
+cloud-init status --wait >/dev/null 2>&1 || true
+uname -n
+rm -f /etc/cloud/cloud-init.disabled
+cloud-init clean --logs
+if [ -d /run/systemd/system ]; then
+  printf 'uninitialized\n' > /etc/machine-id
+else rm -f /etc/machine-id; fi
+[ -L /var/lib/dbus/machine-id ] || rm -f /var/lib/dbus/machine-id
+rm -f /var/lib/systemd/random-seed
+rm -f /var/lib/NetworkManager/*.lease /var/lib/dhcp/*.leases 2>/dev/null || true
+sed -i -E '/^mount[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+virtiofs[[:space:]]/d' /etc/fstab
+sync
 """

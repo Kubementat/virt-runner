@@ -9,7 +9,7 @@ code wins, and the file's date in its header is the reason.
 |---|---|
 | `specification/` | Feature specifications driving the current behaviour (v1.0 POC spec was removed in favour of the README/error-code table). |
 | `tickets/` | The seven POC implementation tickets, slice S1–S7, in execution order. |
-| `plans/` | The POC implementation plan and the `--mount` feature plan. |
+| `plans/` | The POC implementation plan, the `--mount` feature plan, and the snapshot/clone research and implementation handoff. |
 | `reviews/` | The POC acceptance review report. |
 | `code-review-opus.md` | A full-repository code review of `develop` @ `88967c5`, with [its follow-up plan](code-review-opus-plan.md). Most findings are fixed. |
 | `POC-Implementation-Documentation.md` | The POC development narrative, including the command-by-command acceptance evidence. |

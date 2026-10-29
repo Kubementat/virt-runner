@@ -33,6 +33,8 @@ def _vm_document(vm: VmInfo, display_user: str, identity: str) -> dict[str, Any]
         "disk_gib": vm.disk_gib,
         "ssh_user": ssh_user,
         **output.access_commands(vm.name, ssh_user, ip, identity),
+        # The snapshot a clone was created from (null for image-based VMs).
+        "snapshot": vm.meta.get("snapshot"),
     }
 
 

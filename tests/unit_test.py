@@ -1,6 +1,7 @@
 """Pure-logic checks (no libvirt, no network). Run: uv run tests/unit_test.py"""
 
 import json
+import re
 import subprocess
 
 import virt_runner.cmd_list as cmd_list
@@ -194,6 +195,137 @@ def modify_cli(fake, argv):
         res = CliRunner().invoke(cli_main, ["modify", *argv])
     finally:
         cm.Virtualizer = real
+        set_json_mode(False)
+    body = json.loads(res.stdout) if res.stdout.strip() else {}
+    return res.exit_code, body
+
+
+class SnapVz:
+    """A `Virtualizer` for the `snapshot` commands: records calls, fails on demand.
+
+    *fail* names the one method that raises (with the code it would raise);
+    *clones* are the dependents the scan reports.
+    """
+
+    POOL = "vm-pool"
+    DEFAULT_USER = "ubuntu"
+    DEFAULT_SSH_KEY = "/tmp/vr-test/id_ed25519.pub"
+
+    _CODES = {
+        "seal_guest": ("snapshot-seal-failed", "seal"),
+        "copy_to_snapshot": ("snapshot-copy-failed", "copy"),
+        "write_snapshot_meta": ("snapshot-metadata-failed", "metadata"),
+    }
+
+    def __init__(self, *, fail=None, clones=(), snapshots=(), running=True):
+        self.fail = fail
+        self.clones = list(clones)
+        self.snapshots = list(snapshots)
+        self.state = "running" if running else "shut off"
+        self.calls = []
+
+    def _maybe_fail(self, method):
+        self.calls.append(method)
+        if self.fail == method:
+            code, stage = self._CODES[method]
+            raise VirtError(f"{method} failed", code, stage)
+
+    @staticmethod
+    def private_key_path(pub_path):
+        return pub_path.removesuffix(".pub")
+
+    @staticmethod
+    def host_arch():
+        return "x86_64"
+
+    @staticmethod
+    def _mac_of(root):
+        return "52:54:00:aa:bb:cc"
+
+    def preflight_check(self):
+        pass
+
+    require_libvirt = require_pool_defined = preflight_check
+
+    def domain_exists(self, name):
+        return name != "ghost"
+
+    def owns_domain(self, name):
+        return True
+
+    def disk_volume(self, name):
+        return f"{name}_vda.qcow2"
+
+    def snapshot_names(self):
+        return self.snapshots
+
+    def domain_meta(self, name):
+        return {"distro": "ubuntu", "user": "ci", "identity": "/id", "release": "r"}
+
+    def domain_xml_text(self, name):
+        import xml.etree.ElementTree as ET
+
+        return ET.fromstring(VM_XML), VM_XML
+
+    def get_domain_state(self, name):
+        return self.state
+
+    def start_domain(self, name):
+        self.calls.append("start_domain")
+        self.state = "running"
+
+    def wait_for_ip(self, name, mac, lease_file, timeout_s=120):
+        return "192.168.122.9"
+
+    def verify_ssh_reachable(self, name, user, ip, identity=None):
+        pass
+
+    def seal_guest(self, user, ip, identity=None):
+        self._maybe_fail("seal_guest")
+        return "src-host"
+
+    def shutdown_and_wait(self, name, timeout_s):
+        self.calls.append("shutdown_and_wait")
+        self.state = "shut off"
+
+    def copy_to_snapshot(self, src_volume, snap):
+        self._maybe_fail("copy_to_snapshot")
+
+    def write_snapshot_meta(self, snap, meta):
+        self.meta = meta
+        self._maybe_fail("write_snapshot_meta")
+
+    def delete_volume_quiet(self, volume):
+        self.calls.append(("delete_volume_quiet", volume))
+
+    def volume_bytes(self, volume):
+        return {"capacity": 8 * 1024**3, "allocation": 2 * 1024**3}
+
+    def snapshot_path(self, snap):
+        return f"/p/{snap}.snapshot.qcow2"
+
+    def snapshot_dependents(self, snap, users=None):
+        return self.clones
+
+    def delete_snapshot(self, snap):
+        self.calls.append("delete_snapshot")
+        return []
+
+
+def snap_cli(fake, argv):
+    """Run `virt-runner snapshot …` against *fake*: (exit, parsed JSON)."""
+    from click.testing import CliRunner
+
+    import virt_runner.cmd_snapshot as cs
+    from virt_runner.cli import main as cli_main
+    from virt_runner.output import set_json_mode
+
+    real = cs.Virtualizer
+    cs.Virtualizer = lambda: fake
+    try:
+        res = CliRunner().invoke(cli_main, ["snapshot", *argv])
+    finally:
+        cs.Virtualizer = real
         set_json_mode(False)
     body = json.loads(res.stdout) if res.stdout.strip() else {}
     return res.exit_code, body
@@ -1468,6 +1600,7 @@ def main() -> None:
         "ls": "list",
         "s": "ssh",
         "m": "modify",
+        "snap": "snapshot",
     }
     for alias, canonical in ALIASES.items():
         assert cli_main.get_command(None, alias) is cli_main.get_command(
@@ -1529,6 +1662,397 @@ def main() -> None:
         "/id",
     )
     assert (blank["vcpu"], blank["ram_gib"], blank["disk_gib"]) == (None, None, None)
+
+    # --- snapshots: pure helpers -------------------------------------------
+    # Without a hostname the meta-data stays byte-identical to what every VM
+    # created so far booted from (regression guard).
+    assert render_meta_data("i", "c1") == (
+        "id: i\nlocal-hostname: c1\nhostnames:\n  local: c1\n  host: c1\n"
+    )
+    kept = render_meta_data("i", "c1", hostname="src")
+    assert "local-hostname: src\n" in kept and "c1" not in kept, kept
+
+    seal = vz._SEAL_SCRIPT
+    for needle in (
+        "rm -f /etc/cloud/cloud-init.disabled",
+        "cloud-init clean --logs",
+        "> /etc/machine-id",
+        "virtiofs[[:space:]]/d' /etc/fstab",
+        "uname -n",
+    ):
+        assert needle in seal, needle
+    # Host keys are cloud-init's to rotate; Arch has no `hostname` binary.
+    assert "ssh_host_" not in seal
+    assert not re.search(r"(^|[\s;|&(])hostname\b", seal, re.MULTILINE), seal
+
+    assert vz.snapshot_volume("a.b") == "a.b.snapshot.qcow2"
+    assert vz.snapshot_meta_volume("a.b") == "a.b.snapshot.json"
+    for n in ("a", "a.b", "x.snapshot", "vm-1_x"):
+        for vol in (vz.volume_name(n), Virtualizer.cloud_init_iso_volume(n)):
+            assert not vol.endswith((vz.SNAPSHOT_SUFFIX, vz.SNAPSHOT_META_SUFFIX)), vol
+
+    import xml.etree.ElementTree as ET
+
+    vol = ET.fromstring(vz.snapshot_volume_xml("s.snapshot.qcow2", 8589934592))
+    assert vol.findtext("name") == "s.snapshot.qcow2"
+    assert vol.findtext("capacity") == "8589934592"
+    assert vol.find("capacity").get("unit") == "bytes"
+    assert vol.find("target/format").get("type") == "qcow2"
+    assert vol.findtext("target/compat") == "1.1"
+    assert vol.findtext("target/permissions/mode") == "0644"
+
+    overlay = (
+        "<volume><name>c_vda.qcow2</name><target><path>/p/c_vda.qcow2</path>"
+        "</target><backingStore><path>/p/s.snapshot.qcow2</path>"
+        "<format type='qcow2'/></backingStore></volume>"
+    )
+    assert vz.backing_path_of(overlay) == "/p/s.snapshot.qcow2"
+    assert vz.backing_path_of("<volume><name>x</name></volume>") is None
+    assert vz.backing_path_of("not xml <") is None
+
+    assert vz.parse_vol_info_bytes(
+        "Name:  x\nType:  file\nCapacity:  1073741824 bytes\nAllocation:  200704 bytes\n"
+    ) == {"capacity": 1073741824, "allocation": 200704}
+
+    good = {
+        "schema": 1,
+        "name": "s",
+        "user": "ubuntu",
+        "sudo_group": "sudo",
+        "os_variant": "ubuntu-lts-latest",
+        "distro": "ubuntu",
+        "guest_hostname": "src",
+        "virtual_gib": 8,
+        "defaults": {"ram_gib": 1, "vcpu": 1, "disk_gib": 8},
+    }
+    info = vz.parse_snapshot_meta(json.dumps(good))
+    assert (info.name, info.user, info.virtual_gib) == ("s", "ubuntu", 8), info
+    assert info.guest_hostname == "src" and info.defaults["vcpu"] == 1
+    for bad in (
+        json.dumps({k: v for k, v in good.items() if k != "name"}),
+        json.dumps({**good, "schema": 2}),
+        "{not json",
+        "[]",
+    ):
+        try:
+            vz.parse_snapshot_meta(bad)
+        except VirtError as exc:
+            assert exc.code == "snapshot-incomplete", exc.code
+        else:
+            raise AssertionError(f"accepted {bad!r}")
+
+    # --- snapshots: the virsh argv of every Virtualizer call (lesson 013) ---
+    calls = []
+    replies = {}  # argv prefix (tuple) -> CompletedProcess fields
+
+    def fake_spawn(cmd, **kw):
+        # vol-create-from reads a temp XML file: keep its text for the asserts.
+        if cmd[:2] == ["virsh", "vol-create-from"]:
+            calls.append((list(cmd), Path(cmd[3]).read_text()))
+        else:
+            calls.append((list(cmd), kw.get("input")))
+        for prefix, (rc, out, err) in replies.items():
+            if tuple(cmd[: len(prefix)]) == prefix:
+                return subprocess.CompletedProcess(cmd, rc, out, err)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    real_spawn = vz._spawn
+    vz._spawn = fake_spawn
+    try:
+        v = Virtualizer()
+        pool_table = (
+            " Name   Path\n------\n"
+            " a_vda.qcow2  /p/a_vda.qcow2\n"
+            " s.snapshot.qcow2  /p/s.snapshot.qcow2\n"
+            " s.snapshot.json  /p/s.snapshot.json\n"
+            " half.snapshot.qcow2  /p/half.snapshot.qcow2\n"
+        )
+        replies[("virsh", "vol-list")] = (0, pool_table, "")
+        replies[("virsh", "pool-dumpxml")] = (0, "<pool><path>/p</path></pool>", "")
+        replies[("virsh", "vol-dumpxml", "a_vda.qcow2")] = (
+            0,
+            "<volume><backingStore><path>/p/s.snapshot.qcow2</path></backingStore></volume>",
+            "",
+        )
+        assert v.snapshot_names() == ["half", "s"], v.snapshot_names()
+        assert v.snapshot_dependents("s") == ["a"]
+        assert v.snapshot_dependents("half") == []
+
+        for snap, code in (
+            ("nope", "snapshot-not-found"),
+            ("half", "snapshot-incomplete"),
+        ):
+            try:
+                v.read_snapshot_meta(snap)
+            except VirtError as exc:
+                assert exc.code == code, (snap, exc.code)
+            else:
+                raise AssertionError(snap)
+
+        calls.clear()
+        assert v.create_overlay_volume("c", 10, "s") == "c_vda.qcow2"
+        assert calls[0][0] == [
+            "virsh", "vol-create-as", "vm-pool", "c_vda.qcow2", "--capacity", "10G",
+            "--format", "qcow2", "--backing-vol", "s.snapshot.qcow2",
+            "--backing-vol-format", "qcow2",
+        ], calls  # fmt: skip
+
+        calls.clear()
+        replies[("virsh", "vol-info")] = (
+            0, "Capacity: 8589934592 bytes\nAllocation: 1 bytes\n", ""
+        )  # fmt: skip
+        v.copy_to_snapshot("src_vda.qcow2", "s2")
+        argv, xml_text = calls[-1]
+        assert argv[:3] == ["virsh", "vol-create-from", "vm-pool"], argv
+        assert argv[4:] == ["src_vda.qcow2", "--inputpool", "vm-pool"], argv
+        assert "<compat>1.1</compat>" in xml_text and "8589934592" in xml_text
+        assert calls[0][0] == [
+            "virsh", "vol-info", "--bytes", "--pool", "vm-pool", "src_vda.qcow2"
+        ]  # fmt: skip
+
+        # A failed copy removes the half volume — but never a snapshot that
+        # was already there under that name.
+        for err, deletes in (("boom", True), ("name 'x' already in use", False)):
+            calls.clear()
+            replies[("virsh", "vol-create-from")] = (1, "", err)
+            try:
+                v.copy_to_snapshot("src_vda.qcow2", "s2")
+            except VirtError as exc:
+                assert exc.code == "snapshot-copy-failed" and exc.stage == "copy"
+            else:
+                raise AssertionError("copy failure not raised")
+            deleted = [
+                c for c, _ in calls if c[:3] == ["virsh", "--quiet", "vol-delete"]
+            ]
+            assert bool(deleted) == deletes, (err, deleted)
+            if deletes:
+                assert deleted[0][3] == "s2.snapshot.qcow2", deleted
+        del replies[("virsh", "vol-create-from")]
+
+        calls.clear()
+        v.write_snapshot_meta("s2", {"schema": 1})
+        assert calls[0][0][:4] == [
+            "virsh",
+            "vol-create-as",
+            "vm-pool",
+            "s2.snapshot.json",
+        ]
+        assert calls[0][0][-2:] == ["--format", "raw"], calls[0]
+        assert calls[1][0][:5] == [
+            "virsh",
+            "vol-upload",
+            "--pool",
+            "vm-pool",
+            "s2.snapshot.json",
+        ]
+
+        calls.clear()
+        replies[("virsh", "vol-upload")] = (1, "", "denied")
+        try:
+            v.write_snapshot_meta("s2", {"schema": 1})
+        except VirtError as exc:
+            assert exc.code == "snapshot-metadata-failed", exc.code
+        else:
+            raise AssertionError("metadata failure not raised")
+        assert ["virsh", "--quiet", "vol-delete", "s2.snapshot.json", "vm-pool"] in [
+            c for c, _ in calls
+        ]
+        del replies[("virsh", "vol-upload")]
+
+        calls.clear()
+        replies[("virsh", "vol-delete", "s.snapshot.json")] = (
+            1, "", "error: Storage volume not found: no storage vol"
+        )  # fmt: skip
+        assert v.delete_snapshot("s") == [
+            {"name": "s.snapshot.qcow2", "deleted": True, "already_absent": False},
+            {"name": "s.snapshot.json", "deleted": False, "already_absent": True},
+        ]
+
+        # The seal goes through `sudo -n bash -s` with the script on stdin.
+        calls.clear()
+        replies[("ssh",)] = (0, "src-host\n", "")
+        assert v.seal_guest("ubuntu", "10.0.0.5", "/id") == "src-host"
+        argv, stdin = calls[0]
+        assert argv[-4:] == ["sudo", "-n", "bash", "-s"], argv
+        assert "ubuntu@10.0.0.5" in argv and stdin == vz._SEAL_SCRIPT
+        replies[("ssh",)] = (127, "", "uname: not found")
+        try:
+            v.seal_guest("ubuntu", "10.0.0.5", "/id")
+        except VirtError as exc:
+            assert (exc.code, exc.stage) == ("snapshot-seal-failed", "seal")
+        else:
+            raise AssertionError("seal failure not raised")
+
+        # No power-off fallback: a guest that stays up is a timeout, not a destroy.
+        calls.clear()
+        replies[("virsh", "domstate")] = (0, "running\n", "")
+        v.POLL_INTERVAL_S = 0
+        try:
+            v.shutdown_and_wait("src", 0)
+        except VirtError as exc:
+            assert (exc.code, exc.stage) == ("vm-shutdown-timeout", "shutdown")
+        else:
+            raise AssertionError("shutdown timeout not raised")
+        assert ["virsh", "shutdown", "src"] in [c for c, _ in calls]
+        assert not [c for c, _ in calls if "destroy" in c], calls
+
+        calls.clear()
+        v.set_domain_metadata("c", "ubuntu", "u", "/id", release="r", snapshot=None)
+        meta_xml = calls[0][0][-1]
+        assert 'release="r"' in meta_xml and "snapshot" not in meta_xml, meta_xml
+    finally:
+        vz._spawn = real_spawn
+
+    # --- snapshot create / delete flows ------------------------------------
+    fake = SnapVz()
+    code, body = snap_cli(fake, ["create", "t1", "s", "--json"])
+    assert code == 0, body
+    assert list(body) == [
+        "tool", "version", "status", "error", "snapshot", "source", "timings_s",
+        "warnings",
+    ], list(body)  # fmt: skip
+    assert body["tool"] == "vm-snapshot-create"
+    assert set(body["snapshot"]) == {
+        "name", "pool", "volume", "path", "virtual_gib", "allocated_gib", "created_at"
+    }, body["snapshot"]  # fmt: skip
+    assert (body["snapshot"]["virtual_gib"], body["snapshot"]["allocated_gib"]) == (
+        8,
+        2.0,
+    )
+    assert body["source"] == {
+        "name": "t1",
+        "uuid": "6f6da4d2-9d67-4d6a-9c1a-0f0f0f0f0f0f",
+        "was_running": True,
+        "started_for_seal": False,
+        "sealed": True,
+        "state": "shut off",
+    }, body["source"]
+    assert set(body["timings_s"]) == {"seal", "shutdown", "copy"}
+    meta = fake.meta
+    assert meta["schema"] == 1 and meta["guest_hostname"] == "src-host", meta
+    assert meta["defaults"] == {"ram_gib": 2, "vcpu": 2, "disk_gib": 8}, meta
+    assert (meta["user"], meta["sudo_group"], meta["release"]) == ("ci", "sudo", "r")
+    vz.parse_snapshot_meta(json.dumps(meta))  # what create writes, it can read
+
+    # A shut-off source is started to be sealed; --start-source brings it back.
+    fake = SnapVz(running=False)
+    code, body = snap_cli(fake, ["create", "t1", "s", "--start-source", "--json"])
+    assert code == 0 and body["source"]["started_for_seal"] is True, body
+    assert (
+        body["source"]["state"] == "running" and fake.calls.count("start_domain") == 2
+    )
+
+    # Seal failure: stage seal, nothing copied.
+    fake = SnapVz(fail="seal_guest")
+    code, body = snap_cli(fake, ["create", "t1", "s", "--json"])
+    assert code == 1, body
+    assert (body["error"]["code"], body["error"]["stage"]) == (
+        "snapshot-seal-failed",
+        "seal",
+    ), body["error"]
+    assert "copy_to_snapshot" not in fake.calls and body["snapshot"] is None
+    assert body["source"]["sealed"] is False and body["source"]["state"] == "running"
+
+    # Copy failure: no metadata written, no snapshot reported.
+    fake = SnapVz(fail="copy_to_snapshot")
+    code, body = snap_cli(fake, ["create", "t1", "s", "--json"])
+    assert body["error"]["stage"] == "copy" and "write_snapshot_meta" not in fake.calls
+    assert body["snapshot"] is None and body["source"]["state"] == "shut off", body
+
+    # Metadata failure: the copied disk is removed again.
+    fake = SnapVz(fail="write_snapshot_meta")
+    code, body = snap_cli(fake, ["create", "t1", "s", "--json"])
+    assert body["error"]["code"] == "snapshot-metadata-failed", body
+    assert ("delete_volume_quiet", "s.snapshot.qcow2") in fake.calls, fake.calls
+
+    code, body = snap_cli(SnapVz(snapshots=["s"]), ["create", "t1", "s", "--json"])
+    assert body["error"]["code"] == "snapshot-already-exists", body
+    code, body = snap_cli(SnapVz(), ["create", "ghost", "s", "--json"])
+    assert body["error"]["code"] == "vm-not-defined", body
+    code, body = snap_cli(SnapVz(), ["create", "1bad", "s", "--json"])
+    assert code == 2 and body["error"]["code"] == "usage", body
+
+    # Delete refuses while clones depend on the snapshot.
+    fake = SnapVz(snapshots=["s"], clones=["c1", "c2"])
+    code, body = snap_cli(fake, ["delete", "s", "--json"])
+    assert code == 1 and body["error"]["code"] == "snapshot-in-use", body
+    assert body["clones"] == ["c1", "c2"] and "delete_snapshot" not in fake.calls
+    fake = SnapVz(snapshots=["s"])
+    code, body = snap_cli(fake, ["delete", "s", "--json"])
+    assert code == 0 and "delete_snapshot" in fake.calls, body
+    code, body = snap_cli(SnapVz(), ["delete", "s", "--json"])
+    assert body["error"]["code"] == "snapshot-not-found", body
+
+    # --- create --from-snapshot ---------------------------------------------
+    from virt_runner.cmd_create import _create_document
+
+    for argv in (
+        ["create", "x", "--from-snapshot", "s", "--image", "http://u", "--json"],
+        ["create", "x", "--from-snapshot", "s", "--distro", "arch", "--json"],
+        ["create", "x", "--from-snapshot", "s", "--keep-going", "--json"],
+        ["create", "x", "--keep-hostname", "--json"],
+        ["create", "x", "--from-snapshot", "1bad", "--json"],
+    ):
+        res = CliRunner().invoke(cli_main, argv)
+        assert res.exit_code == 2, (argv, res.output)
+        assert json.loads(res.stdout)["error"]["code"] == "usage", res.output
+    set_json_mode(False)
+
+    base = {
+        "name": "c1",
+        "created": True,
+        "booted": True,
+        "uuid": "u",
+        "domain_state": "running",
+        "distro": "ubuntu",
+        "release": "resolute",
+        "arch": "x86_64",
+        "ram_gib": 1,
+        "vcpu": 1,
+        "disk_gib": 8,
+        "mounts": [],
+        "mac": "52:54:00:00:00:01",
+        "ip": "192.168.122.7",
+        "user": "ubuntu",
+        "hostname": "c1",
+        "ssh_identity": "/id",
+        "scripts": [],
+    }
+    plain = _create_document(base)
+    # A normal create only gains vm.hostname, vm.snapshot and snapshot: null.
+    assert plain["snapshot"] is None and "image" not in plain, plain
+    assert plain["vm"]["snapshot"] is None and plain["vm"]["hostname"] == "c1"
+    assert plain["vm"]["dns_name"] == "c1.default"
+    old_vm_keys = {
+        "name", "uuid", "state", "distro", "release", "arch", "ram_gib", "vcpu",
+        "disk_gib", "mounts", "mac", "ip", "dns_name", "ssh_user", "ssh_command",
+        "console_command", "teardown_command", "autostart",
+    }  # fmt: skip
+    assert set(plain["vm"]) == old_vm_keys | {"hostname", "snapshot"}, plain["vm"]
+
+    snap_info = vz.parse_snapshot_meta(
+        json.dumps({**good, "source": {"name": "src"}, "created_at": "T"})
+    )
+    for keep in (False, True):
+        doc = _create_document(
+            {
+                **base,
+                "snapshot": snap_info,
+                "keep_hostname": keep,
+                "hostname": "src" if keep else "c1",
+            }
+        )
+        assert doc["image"] is None and doc["vm"]["snapshot"] == "s", doc
+        assert set(doc["vm"]) == set(plain["vm"]), doc["vm"]
+        assert doc["vm"]["dns_name"] == (None if keep else "c1.default"), doc["vm"]
+        assert doc["snapshot"] == {
+            "name": "s",
+            "volume": "s.snapshot.qcow2",
+            "source_vm": "src",
+            "created_at": "T",
+            "keep_hostname": keep,
+        }, doc["snapshot"]
+    assert list(doc) == ["booted", "vm", "image", "snapshot", "scripts"], list(doc)
 
     print("unit checks ok")
 
